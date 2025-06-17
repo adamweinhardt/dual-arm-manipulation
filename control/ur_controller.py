@@ -147,7 +147,7 @@ class URController(threading.Thread):
         plt.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig("robot_plot.png", dpi=150, bbox_inches="tight")
+        plt.savefig("plots/robot_plot.png", dpi=150, bbox_inches="tight")
         plt.close()
         print(f"Plot saved as robot_plot.png ({len(self.data)} samples)")
 
