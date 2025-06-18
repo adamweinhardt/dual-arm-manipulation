@@ -1,3 +1,5 @@
 numpy
 matplotlib
 ur-rtde
+pyzmq==26.3.0
+robotic==0.2.2
