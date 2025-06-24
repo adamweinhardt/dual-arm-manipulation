@@ -105,7 +105,9 @@ class BoxTracker:
 
 
 if __name__ == "__main__":
-    config_path = "/home/weini/code/robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json"
+    config_path = (
+        "robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json"
+    )
 
     tracker = BoxTracker(config_path)
 
