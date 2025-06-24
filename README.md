@@ -11,28 +11,32 @@ docker run --rm -it \
 
 # Robot IPC Control:
 
+```bash
+cd robot_ipc_control/
+```
+
 ### Camera calibration:
 
 ```python3
-python3 robot_ipc_control/pose_estimation/camera_calibration.py --serial_number 238722073187
+python3 pose_estimation/camera_calibration.py --serial_number 238722073187
 ```
 
 ### Robot base calibration:
 
 ```bash
-./robot_ipc_control/controller/build/impedance_controller robot_ipc_control/controller/config_right.json
+./controller/build/impedance_controller controller/config_right.json
 ```
 
 ```python3
-python3 robot_ipc_control/pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_right.json -s 238722073187
+python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path controller/config_right.json -s 238722073187
 ```
 
 ```bash
-./robot_ipc_control/controller/build/impedance_controller robot_ipc_control/controller/config_left.json
+./controller/build/impedance_controller controller/config_left.json
 ```
 
 ```python3
-python3 robot_ipc_control/pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_left.json -s 238722073187
+python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path controller/config_left.json -s 238722073187
 ```
 
 ### Pose estimation:
