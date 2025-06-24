@@ -24,7 +24,7 @@ python3 robot_ipc_control/pose_estimation/camera_calibration.py --serial_number 
 ```
 
 ```python3
-python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_right.json -s 238722073187
+python3 robot_ipc_control/pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_right.json -s 238722073187
 ```
 
 ```bash
@@ -32,7 +32,7 @@ python3 pose_estimation/robot_base_calibration.py --name right --robot_config_pa
 ```
 
 ```python3
-python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_left.json -s 238722073187
+python3 robot_ipc_control/pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_left.json -s 238722073187
 ```
 
 ### Pose estimation:
