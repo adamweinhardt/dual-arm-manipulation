@@ -11,10 +11,6 @@ docker run --rm -it \
 
 # Robot IPC Control:
 
-```bash
-source robot_ipc_control/venv/bin/activate
-```
-
 ### Camera calibration:
 
 ```python3
@@ -46,10 +42,6 @@ python3 robot_ipc_control/pose_estimation/board_pose_estimator.py --config=robot
 ```
 
 # Dual arm manipulation:
-
-```bash
-source /venv/bin/activate
-```
 
 ### Visualisation:
 
