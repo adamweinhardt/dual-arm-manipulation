@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import robotic as ry
 
-# Import from robot_ipc_control repo
 from robot_ipc_control.pose_estimation.transform_utils import (
     rotation_matrix_to_quaternion,
 )
@@ -135,25 +134,20 @@ class ComprehensiveVisualizer:
         self.config = config
         self.running = False
 
-        # Load scene configuration
         self.scene_config = self._load_scene_config()
 
-        # Initialize components
         self.robot_tracker = (
             RobotStateTracker(config) if config.enable_robot_tracking else None
         )
         self.box_estimator = None
         self.keyboard_handler = None
 
-        # RAI scene setup
         self.C, self.box_names, self.robot_names = make_scene(self.scene_config)
         self.robot_joint_names = {}
 
-        # Get joint names for each robot
         for robot_name in self.robot_names:
             self.robot_joint_names[robot_name] = get_robot_joints(self.C, robot_name)
 
-        # Component status tracking
         self.component_status = {
             "robot_tracker": ComponentStatus.DISCONNECTED,
             "box_estimator": ComponentStatus.DISCONNECTED,
@@ -161,7 +155,7 @@ class ComprehensiveVisualizer:
         }
 
         print(
-            f"📋 Scene initialized with {len(self.robot_names)} robots and {len(self.box_names)} boxes"
+            f"Scene initialized with {len(self.robot_names)} robots and {len(self.box_names)} boxes"
         )
 
     def _load_scene_config(self) -> Dict:
@@ -208,12 +202,12 @@ class ComprehensiveVisualizer:
         command = user_input.strip().lower()
 
         if command == "q" or command == "quit":
-            print("🛑 Shutdown requested")
+            print("Shutdown requested")
             self.running = False
         elif command == "s" or command == "status":
             self._print_status()
         elif command == "r" or command == "reset":
-            print("🔄 Resetting scene view")
+            print("Resetting scene view")
             self.C.view(True)
         elif command == "h" or command == "help":
             self._print_help()
@@ -222,7 +216,7 @@ class ComprehensiveVisualizer:
 
     def _print_help(self):
         """Print available commands"""
-        print("\n📖 Available Commands:")
+        print("\n Available Commands:")
         print("  q, quit  - Shutdown visualizer")
         print("  s, status - Show component status")
         print("  r, reset  - Reset scene view")
@@ -231,7 +225,7 @@ class ComprehensiveVisualizer:
 
     def _print_status(self):
         """Print current status of all components"""
-        print("\n📊 Visualizer Status:")
+        print("\n Visualizer Status:")
         for component, status in self.component_status.items():
             status_icon = {
                 ComponentStatus.DISCONNECTED: "⚫",
@@ -243,6 +237,14 @@ class ComprehensiveVisualizer:
 
         if self.robot_tracker:
             print(f"  Active robots: {len(self.robot_tracker.robot_states)}")
+            for robot_id, state in self.robot_tracker.robot_states.items():
+                if robot_id in [f"robot_{i}" for i in range(len(self.robot_configs))]:
+                    robot_config = self.robot_configs[int(robot_id.split("_")[1])]
+                    print(
+                        f"    {robot_id}: {robot_config['robot_ip']}:{robot_config['publisher_port']}"
+                    )
+                else:
+                    print(f"    {robot_id}: connected")
 
         if self.box_estimator:
             try:
@@ -312,7 +314,7 @@ class ComprehensiveVisualizer:
 
     def start(self):
         """Start the visualization loop"""
-        print("🚀 Starting Comprehensive Robot & Scene Visualizer")
+        print("Starting Comprehensive Robot & Scene Visualizer")
         print("Type 'h' for help, 'q' to quit")
 
         self._initialize_components()
@@ -338,15 +340,15 @@ class ComprehensiveVisualizer:
                 time.sleep(sleep_time)
 
         except KeyboardInterrupt:
-            print("\n🛑 Interrupted by user")
+            print("\n Interrupted by user")
         except Exception as e:
-            print(f"\n💥 Unexpected error: {e}")
+            print(f"\n Unexpected error: {e}")
         finally:
             self.shutdown()
 
     def shutdown(self):
         """Clean shutdown of all components"""
-        print("🧹 Shutting down visualizer...")
+        print(" Shutting down visualizer...")
 
         self.running = False
 
