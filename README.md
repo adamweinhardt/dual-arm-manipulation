@@ -1,6 +1,6 @@
 # dual-arm-manipulation
 
-## Run simulation:
+### UR5 simulator:
 
 ```bash
 docker run --rm -it \
@@ -9,5 +9,60 @@ docker run --rm -it \
   -p 50001-50003:50001-50003 -p 5002:502 \
   -e ROBOT_MODEL=UR5 \
   docker.io/universalrobots/ursim_e-series
+```
+
+### Robot IPC Control:
+
+```bash
+source robot_ipc_control/venv/bin/activate
+```
+
+# Camera calibration:
+
+```python3
+python3 robot_ipc_control/pose_estimation/camera_calibration.py 238722073187
+```
+
+# Robot base calibration:
+
+```bash
+./robot_ipc_control/controller/build/impedance_controller robot_ipc_control/controller/config_right.json
+```
+
+```python3
+python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_right.json -s 238722073187
+```
+
+```bash
+./robot_ipc_control/controller/build/impedance_controller robot_ipc_control/controller/config_left.json
+```
+
+```python3
+python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path robot_ipc_control/controller/config_left.json -s 238722073187
+```
+
+# Pose estimation:
+
+```python3
+python3 robot_ipc_control/pose_estimation/board_pose_estimator.py --config=robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json --detection_type=ransac_with_refinement
+```
+
+### Dual arm manipulation:
+
+
+```bash
+source /venv/bin/activate
+```
+
+# Visualisation:
+
+```python3
+python3 visualizer/visualizer.py
+```
+
+# Control:
+
+```python3
+python3 control/dual_arm_controller.py
 ```
 
