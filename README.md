@@ -14,7 +14,7 @@ docker run --rm -it \
 ### Camera calibration:
 
 ```python3
-python3 robot_ipc_control/pose_estimation/camera_calibration.py 238722073187
+python3 robot_ipc_control/pose_estimation/camera_calibration.py --serial_number 238722073187
 ```
 
 ### Robot base calibration:
