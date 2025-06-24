@@ -36,7 +36,7 @@ python3 pose_estimation/robot_base_calibration.py --name right --robot_config_pa
 ```
 
 ```python3
-python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path controller/config_left.json -s 238722073187
+python3 pose_estimation/robot_base_calibration.py --name left --robot_config_path controller/config_left.json -s 238722073187
 ```
 
 ### Pose estimation:
