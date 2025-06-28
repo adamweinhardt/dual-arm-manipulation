@@ -76,6 +76,16 @@ class URController(threading.Thread):
         )
         self._queue_command(command)
 
+    def speedL(self, speed_vector, acceleration=0.5, time_duration=0.1):
+        command = lambda: self.rtde_control.speedL(
+            speed_vector, acceleration, time_duration
+        )
+        self._queue_command(command)
+
+    def speedStop(self):
+        command = lambda: self.rtde_control.speedStop()
+        self._queue_command(command)
+
     def moveJ(self, joints):
         command = lambda: self.rtde_control.moveJ(
             joints, self.default_joint_speed, self.default_joint_acceleration
@@ -153,7 +163,7 @@ class URController(threading.Thread):
 
 
 if __name__ == "__main__":
-    robot = URController("172.17.0.2")
+    robot = URController("192.168.1.66")
 
     robot.go_home()
     robot.moveL([0.3, 0.2, 0.4, 0, 3.14, 0])
