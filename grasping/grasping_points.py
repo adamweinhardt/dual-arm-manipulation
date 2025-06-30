@@ -8,6 +8,7 @@ import sys
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from scipy.spatial.transform import Rotation as R
+from robot_ipc_control.pose_estimation.transform_utils import quat_to_rotmat
 
 from robot_ipc_control.pose_estimation.board_pose_estimator import BoardPoseEstimator
 
@@ -35,10 +36,12 @@ class FacePair:
 @dataclass
 class GraspingPair:
     box_id: str
-    point1: List[float]
-    point2: List[float]
-    normal1: List[float]
-    normal2: List[float]
+    point1: np.ndarray
+    point2: np.ndarray
+    normal1: np.ndarray
+    normal2: np.ndarray
+    approach_point1: np.ndarray
+    approach_point2: np.ndarray
     pair_type: str
     confidence: float
     total_distance: float
@@ -69,8 +72,9 @@ def get_dimensions_from_config(board_config_path: str) -> tuple:
 class GraspingPointsCalculator:
     """Calculates optimal grasping points using BoardPoseEstimator"""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, approach_offset: float = 0.15):
         self.config_path = config_path
+        self.approach_offset = approach_offset
         self.robot_poses = self._load_robot_poses()
         self.box_dimensions_aruco_axes = self._load_box_dimensions()
 
@@ -127,7 +131,7 @@ class GraspingPointsCalculator:
                 if pose is not None and is_stable:
                     estimated_position = pose[:3]
                     quaternion = pose[3:7]
-                    rotation_matrix = R.from_quat(quaternion).as_matrix()
+                    rotation_matrix = quat_to_rotmat(quaternion)
 
                     height, width, depth = self.box_dimensions_aruco_axes[board_id_int]
 
@@ -138,9 +142,9 @@ class GraspingPointsCalculator:
                         position=box_position,
                         rotation_matrix=rotation_matrix,
                         confidence=confidence,
-                        x_dim=depth,
+                        x_dim=height,
                         y_dim=width,
-                        z_dim=height,
+                        z_dim=depth,
                     )
                     boxes.append(box)
 
@@ -155,9 +159,9 @@ class GraspingPointsCalculator:
 
         half_x_dim, half_y_dim, half_z_dim = x_dim / 2, y_dim / 2, z_dim / 2
 
-        local_x_axis_world = box.rotation_matrix[0, :]
-        local_y_axis_world = box.rotation_matrix[1, :]
-        local_z_axis_world = box.rotation_matrix[2, :]
+        local_x_axis_world = box.rotation_matrix[:, 0]
+        local_y_axis_world = box.rotation_matrix[:, 1]
+        local_z_axis_world = box.rotation_matrix[:, 2]
 
         faces_world = {
             "front": box.position + local_x_axis_world * half_x_dim,  # +X face
@@ -197,9 +201,9 @@ class GraspingPointsCalculator:
         pairs = []
 
         opposing_pairs = [
-            ("front", "back", "front_back_X_axis"),  # Along ArUco X axis
-            ("left", "right", "left_right_Y_axis"),  # Along ArUco Y axis
-            ("top", "bottom", "top_bottom_Z_axis"),  # Along ArUco Z axis
+            ("front", "back", "front_back_X_axis"),
+            ("left", "right", "left_right_Y_axis"),
+            ("top", "bottom", "top_bottom_Z_axis"),
         ]
 
         for face1_name, face2_name, pair_type in opposing_pairs:
@@ -215,11 +219,30 @@ class GraspingPointsCalculator:
 
         return pairs
 
+    def get_approach_points(
+        self,
+        grasp_point1: np.ndarray,
+        grasp_point2: np.ndarray,
+        normal1: np.ndarray,
+        normal2: np.ndarray,
+        offset: float = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if offset is None:
+            offset = self.approach_offset
+
+        normal1_unit = normal1 / np.linalg.norm(normal1)
+        normal2_unit = normal2 / np.linalg.norm(normal2)
+
+        approach_point1 = grasp_point1 + normal1_unit * offset
+        approach_point2 = grasp_point2 + normal2_unit * offset
+
+        return approach_point1, approach_point2
+
     def calculate_face_robot_distances(self, face_center: np.ndarray) -> List[float]:
         """Calculate distances from a face center to all robot bases"""
         distances = []
         for i, robot_pose in enumerate(self.robot_poses):
-            robot_position = robot_pose[:3, 3]  # Extract translation from 4x4 matrix
+            robot_position = robot_pose[:3, 3]
             distance = np.linalg.norm(face_center - robot_position)
             distances.append(distance)
 
@@ -297,12 +320,21 @@ class GraspingPointsCalculator:
             normal1_for_visualizer = best_pair.face1_normal
             normal2_for_visualizer = best_pair.face2_normal
 
+        approach_point1, approach_point2 = self.get_approach_points(
+            point1_for_visualizer,
+            point2_for_visualizer,
+            normal1_for_visualizer,
+            normal2_for_visualizer,
+        )
+
         return GraspingPair(
             box_id=str(box.id),
-            point1=point1_for_visualizer.tolist(),
-            point2=point2_for_visualizer.tolist(),
-            normal1=normal1_for_visualizer.tolist(),
-            normal2=normal2_for_visualizer.tolist(),
+            point1=point1_for_visualizer,
+            point2=point2_for_visualizer,
+            normal1=normal1_for_visualizer,
+            normal2=normal2_for_visualizer,
+            approach_point1=approach_point1,  # NEW
+            approach_point2=approach_point2,  # NEW
             pair_type=best_pair.pair_type,
             confidence=float(box.confidence),
             total_distance=float(best_analysis["total_distance"]),
@@ -318,25 +350,27 @@ class GraspingPointsPublisher:
     """Publishes optimal grasping points via ZMQ"""
 
     def __init__(
-        self, config_path: str, port: int = 5560, publish_rate_hz: float = 10.0
+        self,
+        config_path: str,
+        port: int = 5560,
+        publish_rate_hz: float = 10.0,
+        approach_offset: float = 0.15,
     ):
         self.config_path = config_path
         self.port = port
         self.publish_rate_hz = publish_rate_hz
 
-        # Initialize calculator
-        self.calculator = GraspingPointsCalculator(config_path)
+        self.calculator = GraspingPointsCalculator(config_path, approach_offset)
 
-        # ZMQ setup
         self.context = zmq.Context()
         self.publisher = self.context.socket(zmq.PUB)
         self.publisher.bind(f"tcp://*:{port}")
 
-        # Publishing control
         self.publishing = False
         self.publisher_thread = None
 
         print(f"Grasping points publisher ready on port {port}")
+        print(f"Approach offset: {approach_offset}m")
 
     def start_publishing(self):
         """Start the publishing thread"""
@@ -369,23 +403,25 @@ class GraspingPointsPublisher:
                 if boxes:
                     grasping_data = {}
 
-                    # Calculate grasping points for each box
                     for box in boxes:
                         grasping_pair = self.calculator.find_best_grasping_pair(box)
 
-                        grasping_data[grasping_pair.box_id] = {
-                            "point1": grasping_pair.point1,
-                            "point2": grasping_pair.point2,
-                            "normal1": grasping_pair.normal1,
-                            "normal2": grasping_pair.normal2,
-                            "pair_type": grasping_pair.pair_type,
-                            "confidence": grasping_pair.confidence,
-                            "total_distance": grasping_pair.total_distance,
-                            "robot_assignment": grasping_pair.robot_assignment,
-                            "timestamp": float(time.time()),
-                        }
+                        if grasping_pair:
+                            grasping_data[grasping_pair.box_id] = {
+                                "point1": grasping_pair.point1.tolist(),
+                                "point2": grasping_pair.point2.tolist(),
+                                "normal1": grasping_pair.normal1.tolist(),
+                                "normal2": grasping_pair.normal2.tolist(),
+                                "approach_point1": grasping_pair.approach_point1.tolist(),
+                                "approach_point2": grasping_pair.approach_point2.tolist(),
+                                "approach_offset": self.calculator.approach_offset,
+                                "pair_type": grasping_pair.pair_type,
+                                "confidence": grasping_pair.confidence,
+                                "total_distance": grasping_pair.total_distance,
+                                "robot_assignment": grasping_pair.robot_assignment,
+                                "timestamp": float(time.time()),
+                            }
 
-                    # Publish the data
                     if grasping_data:
                         message = {
                             "timestamp": float(time.time()),
@@ -417,7 +453,7 @@ if __name__ == "__main__":
         "robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json"
     )
 
-    publisher = GraspingPointsPublisher(config_path)
+    publisher = GraspingPointsPublisher(config_path, approach_offset=0.15)
 
     try:
         publisher.start_publishing()
