@@ -1,7 +1,13 @@
 import time
 import threading
 import numpy as np
+import zmq
 from ur_controller import URController
+from dual_arm_controller import DualArmController
+from robot_ipc_control.pose_estimation.transform_utils import (
+    rvec_to_rotmat,
+    rotmat_to_rvec,
+)
 
 
 class PIDController:
@@ -55,6 +61,20 @@ class URForceController(URController):
     def __init__(self, ip, hz=50, kp=0.01, ki=0.0, kd=0):
         super().__init__(ip)
 
+        if self.ip == "192.168.1.66":
+            self.robot_id = 1
+            self.robot_config = np.load(
+                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
+            )
+        elif self.ip == "192.168.1.33":
+            self.robot_id = 0
+            self.robot_config = np.load(
+                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
+            )
+        else:
+            self.robot_id = None
+            self.robot_config = None
+
         self.force_control_active = False
         self.force_control_thread = None
         self.force_control_stop = threading.Event()
@@ -65,6 +85,117 @@ class URForceController(URController):
         self.min_force_threshold = 0.5
 
         self.force_data = []
+
+        self.grasping_context = zmq.Context()
+        self.grasping_socket = self.grasping_context.socket(zmq.SUB)
+        self.grasping_socket.setsockopt(zmq.CONFLATE, 1)
+        self.grasping_socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        grasping_port = 5560
+        self.grasping_socket.connect(f"tcp://127.0.0.1:{grasping_port}")
+
+        self.current_grasping_data = {}
+
+    def _update_grasping_data(self):
+        """Update grasping data from ZMQ (non-blocking)"""
+        try:
+            message = self.grasping_socket.recv_json(flags=zmq.NOBLOCK)
+
+            if "grasping_points" in message:
+                self.current_grasping_data = message["grasping_points"]
+
+                return True
+            else:
+                return False
+        except zmq.Again:
+            return False
+        except Exception as e:
+            print(f"Error receiving grasping data: {e}")
+            return False
+
+    def get_grasping_data(self):
+        """Get approach point for this robot from latest grasping data"""
+
+        # Wait for first message
+        while not self._update_grasping_data():
+            time.sleep(0.01)
+
+        box_id = list(self.current_grasping_data.keys())[0]
+        grasping_info = self.current_grasping_data[box_id]
+
+        if self.robot_id == 1:
+            approach_point = grasping_info.get("approach_point1")
+            normal_vector = grasping_info.get("normal1")
+        elif self.robot_id == 2:
+            approach_point = grasping_info.get("approach_point2")
+            normal_vector = grasping_info.get("normal2")
+        else:
+            return None, None
+
+        if approach_point is None or normal_vector is None:
+            return None, None
+
+        return np.array(approach_point), np.array(normal_vector)
+
+    def world_2_robot_pose(self, world_pose_6d, robot_base_transform):
+        """Convert world pose to robot coordinate frame"""
+        world_T = np.eye(4)
+        world_T[:3, 3] = world_pose_6d[:3]
+        world_T[:3, :3] = rvec_to_rotmat(world_pose_6d[3:])
+
+        robot_base_inv = np.linalg.inv(robot_base_transform)
+        robot_T = robot_base_inv @ world_T
+
+        robot_pos = robot_T[:3, 3]
+        robot_rvec = rotmat_to_rvec(robot_T[:3, :3])
+
+        return np.array(
+            [
+                robot_pos[0],
+                robot_pos[1],
+                robot_pos[2],
+                robot_rvec[0],
+                robot_rvec[1],
+                robot_rvec[2],
+            ]
+        )
+
+    def moveL_world(self, world_pose_6d, a=1.2, v=0.25, t=0, r=0):
+        if self.robot_config is None:
+            print(f"ERROR: No robot configuration loaded for IP {self.ip}")
+            return False
+
+        if isinstance(world_pose_6d, np.ndarray):
+            world_pose_6d = world_pose_6d.tolist()
+
+        if len(world_pose_6d) != 6:
+            print(
+                f"ERROR: world_pose_6d must have 6 elements, got {len(world_pose_6d)}"
+            )
+            return False
+
+        try:
+            robot_pose_6d = self.world_2_robot_pose(world_pose_6d, self.robot_config)
+
+            print(f"Robot {self.robot_id} moveL_world:")
+            print(f"  World pose: {world_pose_6d}")
+            print(f"  Robot pose: {robot_pose_6d.tolist()}")
+
+            # Execute the move
+            self.moveL_ee(robot_pose_6d, a=a, v=v, t=t, r=r)
+
+        except Exception as e:
+            print(f"ERROR in moveL_world: {e}")
+
+    def go_to_approach(self):
+        """Go to approach point for grasping - simplified using moveL_world"""
+        approach_point, normal_vector = self.get_grasping_data()
+        if approach_point is None:
+            print("Cannot go to approach: no valid approach point")
+            return False
+
+        world_pose = [approach_point[0], approach_point[1], approach_point[2], 0, 0, 0]
+
+        return self.moveL_world(world_pose)
 
     def force_control_to_target(
         self, reference_force, direction, distance_cap=0.2, timeout=30.0
@@ -80,7 +211,7 @@ class URForceController(URController):
             return False
         direction = direction / direction_norm
 
-        # Store control parameters
+        self.rtde_control.zeroFtSensor()  # Reset force sensor
         self.ref_force = reference_force
         self.control_direction = direction
         self.distance_cap = distance_cap
@@ -165,30 +296,25 @@ class URForceController(URController):
                     print(f"Force control timeout reached")
                     break
 
-                if abs(force_error) > self.min_force_threshold:
-                    pid_output = self.force_pid.update(force_error)
+                pid_output = self.force_pid.update(force_error)
+                velocity = self.control_direction * pid_output
+                speed_command = [velocity[0], velocity[1], velocity[2], 0, 0, 0]
+                self.speedL(speed_command, acceleration=0.1, time_duration=0.1)
 
-                    velocity = self.control_direction * pid_output
-
-                    speed_command = [velocity[0], velocity[1], velocity[2], 0, 0, 0]
-                    self.speedL(speed_command, acceleration=0.5, time_duration=0.1)
-
-                    if int(time.time() * 10) % 10 == 0:  # Print every 1 second
-                        print(
-                            f"Force: {force_in_direction:.2f}N (target: {self.ref_force}N), "
-                            f"Error: {force_error:.2f}N, "
-                            f"Distance: {distance_moved:.3f}m"
-                        )
-                else:
-                    self.speedStop()
-                    print(
-                        f"Target force achieved: {force_in_direction:.2f}N (target: {self.ref_force}N)"
+                if int(time.time() * 10) % 10 == 0:
+                    status = (
+                        "TRACKING"
+                        if abs(force_error) <= self.min_force_threshold
+                        else "ACQUIRING"
                     )
-                    break
+                    print(
+                        f"[{status}] Force: {force_in_direction:.2f}N (target: {self.ref_force}N), "
+                        f"Error: {force_error:.2f}N, "
+                        f"Distance: {distance_moved:.3f}m"
+                    )
 
             except Exception as e:
                 print(f"Force control error: {e}")
-                # Try to stop robot movement
                 try:
                     self.speedStop()
                 except:
@@ -348,40 +474,44 @@ class URForceController(URController):
 
 
 if __name__ == "__main__":
-    robot = URForceController("192.168.1.66", hz=50, kp=0.015, ki=0.0, kd=0.000005)
+    hz = 50
+    kp = 0.01
+    ki = 0.0
+    kd = 0.000
+
+    robot1 = URForceController("192.168.1.66", hz=hz, kp=kp, ki=ki, kd=kd)
+    # robot2 = URForceController("192.168.1.33", hz=hz, kp=kp, ki=ki, kd=kd)
 
     try:
-        robot.go_home()
+        robot1.go_to_approach()
+        # print("\nStarting force control...")
+        # robot1.force_control_to_target(
+        #     reference_force=10.0,
+        #     direction=[0, 0, -1],
+        #     distance_cap=0.3,
+        #     timeout=20.0,
+        # )
 
-        robot.wait_for_commands()
-        robot.wait_until_done()
+        # print("\nStarting force control...")
+        # robot2.force_control_to_target(
+        #     reference_force=8.0,reference_force
+        #     direction=[0, 1, 0],
+        #     distance_cap=0.2,
+        #     timeout=20.0,
+        # )
 
-        print("Current force reading:", robot.get_current_force())
-        print("Force magnitude:", robot.get_force_magnitude())
+        # robot1.wait_for_force_control()
+        # # robot2.wait_for_force_control()
 
-        print("\nStarting force control...")
-        robot.force_control_to_target(
-            reference_force=10.0,
-            direction=[0, 0, -1],
-            distance_cap=0.2,
-            timeout=30,
-        )
+        # print("Force control complete!")
+        # print("Final force reading:", robot1.get_current_force())
 
-        robot.wait_for_force_control()
-
-        print("Force control complete!")
-        print("Final force reading:", robot.get_current_force())
-
-        robot.plot_force_data()
-
-        print("Returning to home...")
-        robot.go_home()
-        robot.wait_for_commands()
-        robot.wait_until_done()
+        # robot1.plot_force_data()
+        # robot2.plot_force_data()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     finally:
-        robot.disconnect()
-        robot.plot()  # Plot robot motion data
+        robot1.disconnect()
+        # robot2.disconnect()
         print("Robot disconnected")
