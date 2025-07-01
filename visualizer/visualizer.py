@@ -148,6 +148,7 @@ class Visualizer:
             grasp_point2 = np.array(grasp_data["point2"])
             approach_point1 = np.array(grasp_data["approach_point1"])
             approach_point2 = np.array(grasp_data["approach_point2"])
+            print(approach_point2)
 
             if grasp1_name not in self.marker_frames:
                 grasp1 = self.C.addFrame(grasp1_name)
@@ -177,7 +178,7 @@ class Visualizer:
             else:
                 approach1 = self.marker_frames[approach1_name]
 
-            approach1.setPosition(approach_point1)
+            # approach1.setPosition(approach_point1)
 
             if approach2_name not in self.marker_frames:
                 approach2 = self.C.addFrame(approach2_name)

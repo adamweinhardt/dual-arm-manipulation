@@ -25,7 +25,14 @@ class URController(threading.Thread):
         self.rtde_receive = RTDEReceiveInterface(self.ip)
 
         # Defaults
-        self.home_joints = [-pi / 2.0, -pi / 2.0, pi / 2.0, -pi / 2.0, -pi / 2.0, 0.0]
+        self.home_joints = [
+            -pi / 2.0,
+            -pi / 2.0,
+            pi / 2.0,
+            -pi / 2.0,
+            -pi / 2.0,
+            pi,
+        ]
         self.default_speed = 1.0
         self.default_acceleration = 0.5
         self.default_joint_speed = 1.0
@@ -70,7 +77,7 @@ class URController(threading.Thread):
         """Add a movement command to the execution queue"""
         self.command_queue.put(command)
 
-    def moveL(self, pose):
+    def moveL_ee(self, pose):
         command = lambda: self.rtde_control.moveL(
             pose, self.default_speed, self.default_acceleration
         )
@@ -163,11 +170,15 @@ class URController(threading.Thread):
 
 
 if __name__ == "__main__":
-    robot = URController("192.168.1.66")
+    robot = URController("192.168.1.33")
 
     robot.go_home()
-    robot.moveL([0.3, 0.2, 0.4, 0, 3.14, 0])
-    robot.moveL([0.4, 0.3, 0.3, 0, 3.14, 0])
+    time.sleep(1)
+    print(robot.get_state()["pose"])
+    pose = robot.get_state()["pose"] + np.array([0, 0, -0.05, 0, 0, 0])
+    print("Moving to pose:", pose)
+    time.sleep(1)
+    robot.moveL_ee(pose)
 
     robot.wait_for_commands()
     robot.wait_until_done()

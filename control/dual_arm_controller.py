@@ -1,6 +1,8 @@
 import time
 import json
 import threading
+from numpy import pi
+
 import numpy as np
 import zmq
 import argparse
@@ -115,8 +117,16 @@ class DualArmController:
 
     def move_L(self, left_pose, right_pose):
         """Move both arms to different poses simultaneously"""
-        self.left.moveL(left_pose)
-        self.right.moveL(right_pose)
+        self.left.moveL_ee(left_pose)
+        self.right.moveL_ee(right_pose)
+
+    def move_L_offset(self, offset):
+        """Move both arms to different poses simultaneously"""
+        pose1 = self.left.get_state()["pose"] + np.array(offset)
+        pose2 = self.right.get_state()["pose"] + np.array(offset)
+
+        self.left.moveL_ee(pose1)
+        self.right.moveL_ee(pose2)
 
     def move_J(self, left_joints, right_joints):
         """Move both arms to different joint positions simultaneously"""
@@ -130,6 +140,7 @@ class DualArmController:
         self.right.wait_for_commands()
         self.left.wait_until_done()
         self.right.wait_until_done()
+        time.sleep(0.3)  # Brief pause to ensure states are updated
 
     def get_states(self):
         """Get states of both arms"""
@@ -152,8 +163,6 @@ class DualArmController:
         if os.path.exists("robot_plot.png"):
             os.rename("robot_plot.png", "right_arm_plot.png")
         print("Plots saved: left_arm_plot.png, right_arm_plot.png")
-
-    def execute_grasping_from_stream(self, grasping_port=5560, timeout=10.0):
         """Subscribe to grasping points and execute coordinated movement"""
         # ZMQ subscriber for grasping points
         context = zmq.Context()
@@ -249,17 +258,10 @@ def run_test_case():
     )
 
     try:
-        # Home both arms
         dual.go_home()
         dual.wait_for_all()
-        print("Both arms at home")
-
-        # Move to different positions
-        left_pose = [0.3, 0.3, 0.3, 0, 3.14, 0]
-        right_pose = [0.3, 0.3, 0.3, 0, 3.14, 0]
-        dual.move_L(left_pose, right_pose)
-        dual.wait_for_all()
-        print("Coordinated movement complete")
+        # dual.move_L_offset([0.05, 0, -0.3, 0, 0, 0])
+        # dual.wait_for_all()
 
     finally:
         dual.disconnect()
