@@ -140,7 +140,7 @@ class DualArmController:
         self.right.wait_for_commands()
         self.left.wait_until_done()
         self.right.wait_until_done()
-        time.sleep(0.3)  # Brief pause to ensure states are updated
+        time.sleep(0.1)  # Brief pause to ensure states are updated
 
     def get_states(self):
         """Get states of both arms"""

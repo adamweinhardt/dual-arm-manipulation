@@ -36,8 +36,8 @@ class FacePair:
 @dataclass
 class GraspingPair:
     box_id: str
-    point1: np.ndarray
-    point2: np.ndarray
+    grasping_point1: np.ndarray
+    grasping_point2: np.ndarray
     normal1: np.ndarray
     normal2: np.ndarray
     approach_point1: np.ndarray
@@ -249,7 +249,7 @@ class GraspingPointsCalculator:
         return distances
 
     def find_best_grasping_pair(self, box: Box) -> Optional[GraspingPair]:
-        """Find the best opposing face pair for dual-arm grasping"""
+        """Find the best opposing face pair for dual-arm grasping with consistent robot assignment"""
         all_pairs = self.get_all_face_pairs(box)
 
         if not all_pairs:
@@ -268,17 +268,26 @@ class GraspingPointsCalculator:
 
             if assignment1_score < assignment2_score:
                 total_distance = assignment1_score
-
                 robot_assignment = {
                     "0": pair.pair_type.split("_")[0],
                     "1": pair.pair_type.split("_")[1],
                 }
+                # Robot 0 gets face1, Robot 1 gets face2
+                robot0_face_center = pair.face1_center
+                robot0_normal = pair.face1_normal
+                robot1_face_center = pair.face2_center
+                robot1_normal = pair.face2_normal
             else:
                 total_distance = assignment2_score
                 robot_assignment = {
                     "0": pair.pair_type.split("_")[1],
                     "1": pair.pair_type.split("_")[0],
                 }
+                # Robot 0 gets face2, Robot 1 gets face1
+                robot0_face_center = pair.face2_center
+                robot0_normal = pair.face2_normal
+                robot1_face_center = pair.face1_center
+                robot1_normal = pair.face1_normal
 
             if total_distance < best_score:
                 best_score = total_distance
@@ -286,55 +295,37 @@ class GraspingPointsCalculator:
                 best_analysis = {
                     "total_distance": total_distance,
                     "robot_assignment": robot_assignment,
+                    "robot0_face_center": robot0_face_center,
+                    "robot0_normal": robot0_normal,
+                    "robot1_face_center": robot1_face_center,
+                    "robot1_normal": robot1_normal,
                 }
 
         if best_pair is None:
             return None
 
-        current_face_centers = self.get_box_face_centers(box)
-        current_face_normals = self.get_face_normals(box)
+        # Use the consistently assigned robot positions
+        robot0_grasp_point = best_analysis["robot0_face_center"]
+        robot0_normal = best_analysis["robot0_normal"]
+        robot1_grasp_point = best_analysis["robot1_face_center"]
+        robot1_normal = best_analysis["robot1_normal"]
 
-        point1_for_visualizer = None
-        normal1_for_visualizer = None
-        point2_for_visualizer = None
-        normal2_for_visualizer = None
-
-        if best_pair.pair_type == "front_back_X_axis":
-            point1_for_visualizer = current_face_centers["front"]
-            normal1_for_visualizer = current_face_normals["front"]
-            point2_for_visualizer = current_face_centers["back"]
-            normal2_for_visualizer = current_face_normals["back"]
-        elif best_pair.pair_type == "left_right_Y_axis":
-            point1_for_visualizer = current_face_centers["left"]
-            normal1_for_visualizer = current_face_normals["left"]
-            point2_for_visualizer = current_face_centers["right"]
-            normal2_for_visualizer = current_face_normals["right"]
-        elif best_pair.pair_type == "top_bottom_Z_axis":
-            point1_for_visualizer = current_face_centers["top"]
-            normal1_for_visualizer = current_face_normals["top"]
-            point2_for_visualizer = current_face_centers["bottom"]
-            normal2_for_visualizer = current_face_normals["bottom"]
-        else:
-            point1_for_visualizer = best_pair.face1_center
-            point2_for_visualizer = best_pair.face2_center
-            normal1_for_visualizer = best_pair.face1_normal
-            normal2_for_visualizer = best_pair.face2_normal
-
-        approach_point1, approach_point2 = self.get_approach_points(
-            point1_for_visualizer,
-            point2_for_visualizer,
-            normal1_for_visualizer,
-            normal2_for_visualizer,
+        # Calculate approach points with consistent assignment
+        approach_point0, approach_point1 = self.get_approach_points(
+            robot0_grasp_point,  # Robot 0's grasp point
+            robot1_grasp_point,  # Robot 1's grasp point
+            robot0_normal,  # Robot 0's normal
+            robot1_normal,  # Robot 1's normal
         )
 
         return GraspingPair(
             box_id=str(box.id),
-            point1=point1_for_visualizer,
-            point2=point2_for_visualizer,
-            normal1=normal1_for_visualizer,
-            normal2=normal2_for_visualizer,
-            approach_point1=approach_point1,  # NEW
-            approach_point2=approach_point2,  # NEW
+            grasping_point1=robot0_grasp_point,  # Always robot 0
+            grasping_point2=robot1_grasp_point,  # Always robot 1
+            normal1=robot0_normal,  # Always robot 0
+            normal2=robot1_normal,  # Always robot 1
+            approach_point1=approach_point0,  # Always robot 0
+            approach_point2=approach_point1,  # Always robot 1
             pair_type=best_pair.pair_type,
             confidence=float(box.confidence),
             total_distance=float(best_analysis["total_distance"]),
@@ -391,7 +382,7 @@ class GraspingPointsPublisher:
             print("Grasping points publishing stopped")
 
     def _publish_loop(self):
-        """Main publishing loop"""
+        """Main publishing loop with explicit robot assignment"""
         interval = 1.0 / self.publish_rate_hz
 
         while self.publishing:
@@ -408,12 +399,12 @@ class GraspingPointsPublisher:
 
                         if grasping_pair:
                             grasping_data[grasping_pair.box_id] = {
-                                "point1": grasping_pair.point1.tolist(),
-                                "point2": grasping_pair.point2.tolist(),
-                                "normal1": grasping_pair.normal1.tolist(),
-                                "normal2": grasping_pair.normal2.tolist(),
-                                "approach_point1": grasping_pair.approach_point1.tolist(),
-                                "approach_point2": grasping_pair.approach_point2.tolist(),
+                                "grasping_point1": grasping_pair.grasping_point1.tolist(),  # always robot 0
+                                "grasping_point2": grasping_pair.grasping_point2.tolist(),  # always robot 1
+                                "normal1": grasping_pair.normal1.tolist(),  # always robot 0
+                                "normal2": grasping_pair.normal2.tolist(),  # always robot 1
+                                "approach_point1": grasping_pair.approach_point1.tolist(),  # always robot 0
+                                "approach_point2": grasping_pair.approach_point2.tolist(),  # always robot 1
                                 "approach_offset": self.calculator.approach_offset,
                                 "pair_type": grasping_pair.pair_type,
                                 "confidence": grasping_pair.confidence,
