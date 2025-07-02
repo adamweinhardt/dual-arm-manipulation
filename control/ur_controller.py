@@ -9,12 +9,31 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
+from robot_ipc_control.pose_estimation.transform_utils import (
+    rvec_to_rotmat,
+    rotmat_to_rvec,
+    quat_to_rotmat,
+)
 
 
 class URController(threading.Thread):
     def __init__(self, ip):
         super().__init__(daemon=True)
         self.ip = ip
+
+        if self.ip == "192.168.1.66":
+            self.robot_id = 1
+            self.robot_config = np.load(
+                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
+            )
+        elif self.ip == "192.168.1.33":
+            self.robot_id = 0
+            self.robot_config = np.load(
+                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
+            )
+        else:
+            self.robot_id = None
+            self.robot_config = None
 
         # Command queue for threading
         self.command_queue = queue.Queue()
@@ -33,6 +52,9 @@ class URController(threading.Thread):
             -pi / 2.0,
             pi,
         ]
+        self.ee2marker = np.array(
+            [-0.0064, 0.05753, -0.1149, -0.69923, -0.0101, -0.00407, 0.71481]
+        )
         self.default_speed = 1.0
         self.default_acceleration = 0.5
         self.default_joint_speed = 1.0
@@ -82,6 +104,117 @@ class URController(threading.Thread):
             pose, self.default_speed, self.default_acceleration
         )
         self._queue_command(command)
+
+    def world_2_robot_pose(self, world_pose_6d, robot_base_transform):
+        """Convert world pose to robot coordinate frame"""
+        # Ensure we have a numpy array
+        world_pose_6d = np.array(world_pose_6d)
+
+        world_T = np.eye(4)
+        world_T[:3, 3] = world_pose_6d[:3]
+        world_T[:3, :3] = rvec_to_rotmat(world_pose_6d[3:])
+
+        robot_base_inv = np.linalg.inv(robot_base_transform)
+        robot_T = robot_base_inv @ world_T
+
+        robot_pos = robot_T[:3, 3]
+        robot_rvec = rotmat_to_rvec(robot_T[:3, :3])
+
+        return np.array(
+            [
+                robot_pos[0],
+                robot_pos[1],
+                robot_pos[2],
+                robot_rvec[0],
+                robot_rvec[1],
+                robot_rvec[2],
+            ]
+        )
+
+    def moveL_world(self, world_pose_6d):
+        if self.robot_config is None:
+            print(f"ERROR: No robot configuration loaded for IP {self.ip}")
+            return False
+
+        if isinstance(world_pose_6d, np.ndarray):
+            world_pose_6d = world_pose_6d.tolist()
+
+        if len(world_pose_6d) != 6:
+            print(
+                f"ERROR: world_pose_6d must have 6 elements, got {len(world_pose_6d)}"
+            )
+            return False
+
+        try:
+            robot_pose_6d = self.world_2_robot_pose(world_pose_6d, self.robot_config)
+
+            print(f"Robot {self.robot_id} moveL_world:")
+            print(f"  Current pose: {self.get_state()['pose']}")
+            print(f"  Robot pose: {robot_pose_6d.tolist()}")
+            print(f"  World pose: {world_pose_6d}")
+
+            robot_pose_6d[3:] = self.get_state()["pose"][3:]  # Keep current orientation
+
+            # Execute the move
+            self.moveL_ee(robot_pose_6d)
+
+        except Exception as e:
+            print(f"ERROR in moveL_world: {e}")
+
+    def moveL_gripper_world(self, gripper_world_pose_6d):
+        if self.robot_config is None:
+            print(f"ERROR: No robot configuration loaded for IP {self.ip}")
+            return False
+
+        if not hasattr(self, "ee2marker"):
+            print(f"ERROR: ee2marker calibration not loaded for robot {self.robot_id}")
+            return False
+
+        # Ensure we have a numpy array
+        gripper_world_pose_6d = np.array(gripper_world_pose_6d)
+
+        if len(gripper_world_pose_6d) != 6:
+            print(
+                f"ERROR: gripper_world_pose_6d must have 6 elements, got {len(gripper_world_pose_6d)}"
+            )
+            return False
+
+        try:
+            gripper_world_T = np.eye(4)
+            gripper_world_T[:3, 3] = gripper_world_pose_6d[:3]
+            gripper_world_T[:3, :3] = rvec_to_rotmat(gripper_world_pose_6d[3:])
+
+            ee2marker_T = np.eye(4)
+            ee2marker_T[:3, 3] = self.ee2marker[:3]
+            quat_xyzw = self.ee2marker[3:]  # [qx, qy, qz, qw]
+            quat_wxyz = [
+                quat_xyzw[3],
+                quat_xyzw[0],
+                quat_xyzw[1],
+                quat_xyzw[2],
+            ]  # [qw, qx, qy, qz]
+            ee2marker_T[:3, :3] = quat_to_rotmat(quat_wxyz)
+
+            marker2ee_T = np.linalg.inv(ee2marker_T)
+            ee_world_T = gripper_world_T @ marker2ee_T
+
+            ee_world_pos = ee_world_T[:3, 3]
+            ee_world_rvec = rotmat_to_rvec(ee_world_T[:3, :3])
+            ee_world_pose_6d = np.array(
+                [
+                    ee_world_pos[0],
+                    ee_world_pos[1],
+                    ee_world_pos[2],
+                    ee_world_rvec[0],
+                    ee_world_rvec[1],
+                    ee_world_rvec[2],
+                ]
+            )
+
+            self.moveL_world(ee_world_pose_6d)
+
+        except Exception as e:
+            print(f"ERROR in moveL_gripper_world: {e}")
 
     def speedL(self, speed_vector, acceleration=0.5, time_duration=0.1):
         command = lambda: self.rtde_control.speedL(
@@ -179,6 +312,9 @@ if __name__ == "__main__":
     print("Moving to pose:", pose)
     time.sleep(1)
     robot.moveL_ee(pose)
+    time.sleep(1)
+
+    robot.moveL_world([0, 0.0, 0.5, 0.0, 0.0, 0.0])
 
     robot.wait_for_commands()
     robot.wait_until_done()
