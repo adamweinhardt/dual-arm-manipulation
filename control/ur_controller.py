@@ -55,6 +55,7 @@ class URController(threading.Thread):
         self.ee2marker = np.array(
             [-0.0064, 0.05753, -0.1149, -0.69923, -0.0101, -0.00407, 0.71481]
         )
+        self.ee2marker_offset = np.array([0, 0.05753, -0.10, 0, 0, 0])
         self.default_speed = 1.0
         self.default_acceleration = 0.5
         self.default_joint_speed = 1.0
@@ -148,14 +149,6 @@ class URController(threading.Thread):
         try:
             robot_pose_6d = self.world_2_robot_pose(world_pose_6d, self.robot_config)
 
-            print(f"Robot {self.robot_id} moveL_world:")
-            print(f"  Current pose: {self.get_state()['pose']}")
-            print(f"  Robot pose: {robot_pose_6d.tolist()}")
-            print(f"  World pose: {world_pose_6d}")
-
-            robot_pose_6d[3:] = self.get_state()["pose"][3:]  # Keep current orientation
-
-            # Execute the move
             self.moveL_ee(robot_pose_6d)
 
         except Exception as e:
@@ -180,38 +173,7 @@ class URController(threading.Thread):
             return False
 
         try:
-            gripper_world_T = np.eye(4)
-            gripper_world_T[:3, 3] = gripper_world_pose_6d[:3]
-            gripper_world_T[:3, :3] = rvec_to_rotmat(gripper_world_pose_6d[3:])
-
-            ee2marker_T = np.eye(4)
-            ee2marker_T[:3, 3] = self.ee2marker[:3]
-            quat_xyzw = self.ee2marker[3:]  # [qx, qy, qz, qw]
-            quat_wxyz = [
-                quat_xyzw[3],
-                quat_xyzw[0],
-                quat_xyzw[1],
-                quat_xyzw[2],
-            ]  # [qw, qx, qy, qz]
-            ee2marker_T[:3, :3] = quat_to_rotmat(quat_wxyz)
-
-            marker2ee_T = np.linalg.inv(ee2marker_T)
-            ee_world_T = gripper_world_T @ marker2ee_T
-
-            ee_world_pos = ee_world_T[:3, 3]
-            ee_world_rvec = rotmat_to_rvec(ee_world_T[:3, :3])
-            ee_world_pose_6d = np.array(
-                [
-                    ee_world_pos[0],
-                    ee_world_pos[1],
-                    ee_world_pos[2],
-                    ee_world_rvec[0],
-                    ee_world_rvec[1],
-                    ee_world_rvec[2],
-                ]
-            )
-
-            self.moveL_world(ee_world_pose_6d)
+            self.moveL_world(gripper_world_pose_6d + self.ee2marker_offset)
 
         except Exception as e:
             print(f"ERROR in moveL_gripper_world: {e}")
@@ -239,8 +201,11 @@ class URController(threading.Thread):
         self._queue_command(command)
 
     def get_state(self):
+        pose = self.rtde_receive.getActualTCPPose()
+        pose_world = self.world_2_robot_pose(pose, self.robot_config)
         return {
-            "pose": self.rtde_receive.getActualTCPPose(),
+            "pose": pose,
+            "pose_world": pose_world,
             "joints": self.rtde_receive.getActualQ(),
             "speed": self.rtde_receive.getActualTCPSpeed(),
             "force": self.rtde_receive.getActualTCPForce(),

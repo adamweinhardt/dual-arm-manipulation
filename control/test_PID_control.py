@@ -28,7 +28,7 @@ if __name__ == "__main__":
     print(ref_pose)
 
     try:
-        robot.control_to_target(
+        robot.control_to_target_manual(
             target_position=ref_pose,
             reference_force=10.0,
             direction=[0, 0, -1],

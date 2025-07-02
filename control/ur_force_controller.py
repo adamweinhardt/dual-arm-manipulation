@@ -141,7 +141,7 @@ class URForceController(URController):
             print("Cannot go to approach: no valid approach point")
             return False
 
-        rotation_matrix = end_effector_rotation_from_normal(normal)
+        rotation_matrix = end_effector_rotation_from_normal(-normal)
 
         world_rotation = rotmat_to_rvec(rotation_matrix)
 
@@ -161,7 +161,7 @@ class URForceController(URController):
 
         self.moveL_gripper_world(world_pose)
 
-    def control_to_target(
+    def control_to_target_manual(
         self,
         target_position=None,
         reference_force=None,
@@ -178,6 +178,59 @@ class URForceController(URController):
 
         current_state = self.get_state()
         self.start_position = np.array(current_state["pose"][:3])
+
+        if target_position is None:
+            self.target_position = self.start_position.copy()
+        else:
+            self.target_position = np.array(target_position)
+
+        if reference_force is None:
+            self.ref_force = 0.0
+        else:
+            self.ref_force = reference_force
+
+        self.control_direction = direction
+        self.distance_cap = distance_cap
+        self.control_timeout = timeout
+        self.start_time = time.time()
+
+        self.force_pid.reset()
+        self.pose_pid.reset()
+        self.control_data = []
+
+        self.rtde_control.zeroFtSensor()
+
+        self.control_active = True
+        self.control_stop.clear()
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self.control_thread.start()
+
+        print(f"Dual control started:")
+        print(f"  Target position: {self.target_position}")
+        print(f"  Reference force: {self.ref_force}N")
+        print(f"  Direction: {direction}")
+        print(f"  Distance cap: {distance_cap}m, Timeout: {timeout}s")
+
+        return True
+
+    def control_to_target(
+        self,
+        reference_force=None,
+        distance_cap=0.2,
+        timeout=30.0,
+    ):
+        if self.control_active:
+            print("Control already active!")
+            return False
+
+        target_position, _, normal = self.get_grasping_data()
+        direction = np.array(-normal, dtype=float)
+        direction = direction / np.linalg.norm(direction)
+
+        current_state = self.get_state()
+        self.start_position = np.array(currentarget(
+            reference_force=10.0,
+            distance_cap=1_state["pose"][:3])
 
         if target_position is None:
             self.target_position = self.start_position.copy()
@@ -632,25 +685,35 @@ class URForceController(URController):
 
 if __name__ == "__main__":
     hz = 50
-    kp_f = 0.01
-    kd_f = 0.000
-    kp_p = 0.0
-    kd_p = 0.000
+
+    kp_f = 0.005
+    ki_f = 0.000
+    kd_f = 0.0001
+
+    kp_p = 0.5
+    ki_p = 0.2
+    kd_p = 0.002
 
     robot1 = URForceController(
-        "192.168.1.66", hz=hz, kp_f=kp_f, kd_f=kd_f, kp_p=kp_p, kd_p=kd_p
+        "192.168.1.66",
+        hz=hz,
+        kp_f=kp_f,
+        ki_f=ki_f,
+        kd_f=kd_f,
+        kp_p=kp_p,
+        ki_p=ki_p,
+        kd_p=kd_p,
     )
     # robot2 = URForceController("192.168.1.33", hz=hz, kp=kp, ki=ki, kd=kd)
 
     try:
         robot1.go_to_approach()
-        # print("\nStarting force control...")
-        # robot1.force_control_to_target(
-        #     reference_force=10.0,
-        #     direction=[0, 0, -1],
-        #     distance_cap=0.3,
-        #     timeout=20.0,
-        # )1
+        print("\nStarting force control...")
+        robot1.control_to_target(
+            reference_force=10.0,
+            distance_cap=1,
+            timeout=20.0,
+        )
 
         # print("\nStarting force control...")
         # robot2.force_control_to_target(
@@ -660,13 +723,13 @@ if __name__ == "__main__":
         #     timeout=20.0,
         # )
 
-        # robot1.wait_for_force_control()
+        robot1.wait_for_control()
         # # robot2.wait_for_force_control()
 
         # print("Force control complete!")
         # print("Final force reading:", robot1.get_current_force())
 
-        # robot1.plot_force_data()
+        robot1.plot_data()
         # robot2.plot_force_data()
 
     except KeyboardInterrupt:
