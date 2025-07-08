@@ -18,7 +18,7 @@ cd robot_ipc_control/
 ### Camera calibration:
 
 ```python3
-python3 pose_estimation/camera_calibration.py --serial_number 238722073187
+python3 pose_estimation/camera_calibration.py --serial_number 138322253845
 ```
 
 ### Robot base calibration:
@@ -28,7 +28,7 @@ python3 pose_estimation/camera_calibration.py --serial_number 238722073187
 ```
 
 ```python3
-python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path controller/config_right.json -s 238722073187
+python3 pose_estimation/robot_base_calibration.py --name right --robot_config_path controller/config_right.json -s 138322253845
 ```
 
 ```bash
@@ -36,7 +36,7 @@ python3 pose_estimation/robot_base_calibration.py --name right --robot_config_pa
 ```
 
 ```python3
-python3 pose_estimation/robot_base_calibration.py --name left --robot_config_path controller/config_left.json -s 238722073187
+python3 pose_estimation/robot_base_calibration.py --name left --robot_config_path controller/config_left.json -s 138322253845
 ```
 
 ### Pose estimation:
