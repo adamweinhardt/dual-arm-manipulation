@@ -138,17 +138,26 @@ class Visualizer:
 
     def _update_grasping_markers(self, box_id: str, grasp_data: dict):
         try:
+            grasp0_name = f"grasp_point0_box_{box_id}"
             grasp1_name = f"grasp_point1_box_{box_id}"
-            grasp2_name = f"grasp_point2_box_{box_id}"
 
+            approach0_name = f"approach_point0_box_{box_id}"
             approach1_name = f"approach_point1_box_{box_id}"
-            approach2_name = f"approach_point2_box_{box_id}"
 
+            grasp_point0 = np.array(grasp_data["grasping_point0"])
             grasp_point1 = np.array(grasp_data["grasping_point1"])
-            grasp_point2 = np.array(grasp_data["grasping_point2"])
+            approach_point0 = np.array(grasp_data["approach_point0"])
             approach_point1 = np.array(grasp_data["approach_point1"])
-            approach_point2 = np.array(grasp_data["approach_point2"])
-            print(approach_point2)
+
+            if grasp0_name not in self.marker_frames:
+                grasp0 = self.C.addFrame(grasp0_name)
+                grasp0.setShape(ry.ST.sphere, [0.02])
+                grasp0.setColor([1.0, 0.0, 0.0, 0.9])
+                self.marker_frames[grasp0_name] = grasp0
+            else:
+                grasp0 = self.marker_frames[grasp0_name]
+
+            grasp0.setPosition(grasp_point0)
 
             if grasp1_name not in self.marker_frames:
                 grasp1 = self.C.addFrame(grasp1_name)
@@ -160,15 +169,15 @@ class Visualizer:
 
             grasp1.setPosition(grasp_point1)
 
-            if grasp2_name not in self.marker_frames:
-                grasp2 = self.C.addFrame(grasp2_name)
-                grasp2.setShape(ry.ST.sphere, [0.02])
-                grasp2.setColor([1.0, 0.0, 0.0, 0.9])
-                self.marker_frames[grasp2_name] = grasp2
+            if approach0_name not in self.marker_frames:
+                approach0 = self.C.addFrame(approach0_name)
+                approach0.setShape(ry.ST.sphere, [0.02])
+                approach0.setColor([0.0, 0.0, 1.0, 0.9])
+                self.marker_frames[approach0_name] = approach0
             else:
-                grasp2 = self.marker_frames[grasp2_name]
+                approach0 = self.marker_frames[approach0_name]
 
-            grasp2.setPosition(grasp_point2)
+            approach0.setPosition(approach_point0)
 
             if approach1_name not in self.marker_frames:
                 approach1 = self.C.addFrame(approach1_name)
@@ -179,16 +188,6 @@ class Visualizer:
                 approach1 = self.marker_frames[approach1_name]
 
             approach1.setPosition(approach_point1)
-
-            if approach2_name not in self.marker_frames:
-                approach2 = self.C.addFrame(approach2_name)
-                approach2.setShape(ry.ST.sphere, [0.02])
-                approach2.setColor([0.0, 0.0, 1.0, 0.9])
-                self.marker_frames[approach2_name] = approach2
-            else:
-                approach2 = self.marker_frames[approach2_name]
-
-            approach2.setPosition(approach_point2)
 
         except Exception as e:
             print(f"Marker update error for box {box_id}: {e}")

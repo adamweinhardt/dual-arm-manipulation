@@ -4,6 +4,7 @@ import queue
 from numpy import pi
 import numpy as np
 import matplotlib
+import zmq
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -26,22 +27,36 @@ class URController(threading.Thread):
             self.robot_config = np.load(
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
             )
+            self.port = 5559
+            self.ee2marker_offset = np.array([0.055, 0.05753, -0.10, 0, 0, 0])
+
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
             self.robot_config = np.load(
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
             )
+            self.port = 5556
+            self.ee2marker_offset = np.array([-0.055, -0.05753, -0.10, 0, 0, 0])
         else:
             self.robot_id = None
             self.robot_config = None
+            self.port = None
+            self.ee2marker_offset = None
+
+        # Robot connections
+        self.rtde_control = RTDEControlInterface(self.ip)
+        self.rtde_receive = RTDEReceiveInterface(self.ip)
 
         # Command queue for threading
         self.command_queue = queue.Queue()
         self._stop_event = threading.Event()
 
-        # Robot connections
-        self.rtde_control = RTDEControlInterface(self.ip)
-        self.rtde_receive = RTDEReceiveInterface(self.ip)
+        # State publisher
+        self.publishing = False
+        self.context = zmq.Context()
+        self.publisher = self.context.socket(zmq.PUB)
+        self.publisher.bind(f"tcp://127.0.0.1:{self.port}")
+        self._start_publishing()
 
         # Defaults
         self.home_joints = [
@@ -55,7 +70,6 @@ class URController(threading.Thread):
         self.ee2marker = np.array(
             [-0.0064, 0.05753, -0.1149, -0.69923, -0.0101, -0.00407, 0.71481]
         )
-        self.ee2marker_offset = np.array([0, 0.05753, -0.10, 0, 0, 0])
         self.default_speed = 1.0
         self.default_acceleration = 0.5
         self.default_joint_speed = 1.0
@@ -83,6 +97,65 @@ class URController(threading.Thread):
                 self.command_queue.task_done()
             except queue.Empty:
                 continue
+
+    def _start_publishing(self):
+        """Start the state publishing thread"""
+        self.publishing = True
+        self.publisher_thread = threading.Thread(target=self._publish_loop, daemon=True)
+        self.publisher_thread.start()
+
+    def _stop_publishing(self):
+        """Stop the state publishing thread"""
+        if self.publishing:
+            self.publishing = False
+            if self.publisher_thread:
+                self.publisher_thread.join(timeout=1.0)
+            print(f"State publishing stopped for {self.robot_id}")
+
+    def _publish_loop(self):
+        """Main publishing loop - runs in background thread"""
+        rate_hz = 20  # 20Hz update rate
+        interval = 1.0 / rate_hz
+
+        def to_list(data):
+            """Convert numpy arrays to lists for JSON serialization"""
+            if hasattr(data, "tolist"):
+                return data.tolist()
+            elif isinstance(data, (list, tuple)):
+                return list(data)
+            else:
+                return data
+
+        while self.publishing:
+            try:
+                start_time = time.time()
+
+                # Get current robot state
+                robot_state = self.get_state()
+
+                if robot_state and self.publisher:
+                    # Convert numpy arrays to lists for JSON serialization
+                    message = {
+                        "timestamp": time.time(),
+                        "robot_id": self.robot_id,
+                        "Q": to_list(robot_state.get("joints", [])),
+                        "pos": to_list(robot_state.get("pose", [])),
+                        "vel": to_list(robot_state.get("speed", [])),
+                        "force": to_list(robot_state.get("force", [])),
+                        "pose_world": to_list(robot_state.get("pose_world", [])),
+                    }
+
+                    # Publish state
+                    self.publisher.send_json(message)
+
+                # Rate limiting
+                elapsed = time.time() - start_time
+                sleep_time = max(0, interval - elapsed)
+                time.sleep(sleep_time)
+
+            except Exception as e:
+                print(f"Publishing error for {self.robot_id}: {e}")
+                time.sleep(0.1)  # Brief pause before retry
 
     def _record_during_movement(self):
         """Records robot state data while movement is happening"""
@@ -268,23 +341,25 @@ class URController(threading.Thread):
 
 
 if __name__ == "__main__":
-    robot = URController("192.168.1.33")
+    robotR = URController("192.168.1.66")
+    robotL = URController("192.168.1.33")
 
-    robot.go_home()
-    time.sleep(1)
-    print(robot.get_state()["pose"])
-    pose = robot.get_state()["pose"] + np.array([0, 0, -0.05, 0, 0, 0])
-    print("Moving to pose:", pose)
-    time.sleep(1)
-    robot.moveL_ee(pose)
-    time.sleep(1)
+    time.sleep(0.1)
 
-    robot.moveL_world([0, 0.0, 0.5, 0.0, 0.0, 0.0])
+    try:
+        robotR.go_home()
+        robotL.go_home()
 
-    robot.wait_for_commands()
-    robot.wait_until_done()
+        robotR.wait_for_commands()
+        robotL.wait_for_commands()
 
-    print("Sequence complete!")
+        robotR.wait_until_done()
+        robotL.wait_until_done()
 
-    robot.disconnect()
-    robot.plot()
+    except KeyboardInterrupt:
+        print("Interrupted by user")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        robotR.disconnect()
+        robotL.disconnect()

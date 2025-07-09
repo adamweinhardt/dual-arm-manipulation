@@ -2,7 +2,6 @@ import time
 import json
 import threading
 from numpy import pi
-
 import numpy as np
 import zmq
 import argparse
@@ -10,9 +9,7 @@ from ur_controller import URController
 
 
 class DualArmController:
-    def __init__(
-        self, left_ip, right_ip, publish_states=False, left_port=5556, right_port=5559
-    ):
+    def __init__(self, left_ip, right_ip):
         """Initialize dual arm controller
 
         Args:
@@ -22,92 +19,11 @@ class DualArmController:
             left_port: ZMQ port for left robot state publishing
             right_port: ZMQ port for right robot state publishing
         """
-        self.left = URController(left_ip)
+        # Initialize robots with state publishing if enabled
+        self.left = URController(
+            left_ip,
+        )
         self.right = URController(right_ip)
-
-        # State publishing setup
-        self.publish_states = publish_states
-        self.publishing = False
-        self.publisher_thread = None
-
-        if self.publish_states:
-            self.context = zmq.Context()
-
-            # Create publishers for each robot
-            self.left_publisher = self.context.socket(zmq.PUB)
-            self.left_publisher.bind(f"tcp://*:{left_port}")
-
-            self.right_publisher = self.context.socket(zmq.PUB)
-            self.right_publisher.bind(f"tcp://*:{right_port}")
-
-            print(f" State publishing enabled:")
-            print(f"  Left robot:  tcp://{left_ip}:{left_port}")
-            print(f"  Right robot: tcp://{right_ip}:{right_port}")
-
-            # Start publishing thread
-            self.start_publishing()
-
-    def start_publishing(self):
-        """Start the state publishing thread"""
-        if not self.publish_states:
-            return
-
-        self.publishing = True
-        self.publisher_thread = threading.Thread(target=self._publish_loop, daemon=True)
-        self.publisher_thread.start()
-        print("State publishing started")
-
-    def stop_publishing(self):
-        """Stop the state publishing thread"""
-        if self.publishing:
-            self.publishing = False
-            if self.publisher_thread:
-                self.publisher_thread.join()
-            print("State publishing stopped")
-
-    def _publish_loop(self):
-        """Main publishing loop - runs in background thread"""
-        rate_hz = 20  # 20Hz update rate
-        interval = 1.0 / rate_hz
-
-        while self.publishing:
-            try:
-                start_time = time.time()
-
-                # Get current robot states
-                left_state = self.left.get_state()
-                right_state = self.right.get_state()
-
-                # Publish left robot state
-                if left_state:
-                    left_msg = {
-                        "timestamp": time.time(),
-                        "robot_id": "robot_0",
-                        "Q": left_state.get("joints", []),
-                        "pos": left_state.get("pose", []),
-                        "vel": left_state.get("speed", []),
-                    }
-                    self.left_publisher.send_json(left_msg)
-
-                # Publish right robot state
-                if right_state:
-                    right_msg = {
-                        "timestamp": time.time(),
-                        "robot_id": "robot_1",
-                        "Q": right_state.get("joints", []),  # FIX: use 'joints' key
-                        "pos": right_state.get("pose", []),  # FIX: use 'pose' key
-                        "vel": right_state.get("speed", []),  # FIX: use 'speed' key
-                    }
-                    self.right_publisher.send_json(right_msg)
-
-                # Rate limiting
-                elapsed = time.time() - start_time
-                sleep_time = max(0, interval - elapsed)
-                time.sleep(sleep_time)
-
-            except Exception as e:
-                print(f"Publishing error: {e}")
-                time.sleep(0.1)  # Brief pause before retry
 
     # === Basic Coordinated Commands ===
     def go_home(self):
@@ -121,12 +37,21 @@ class DualArmController:
         self.right.moveL_ee(right_pose)
 
     def move_L_offset(self, offset):
-        """Move both arms to different poses simultaneously"""
-        pose1 = self.left.get_state()["pose"] + np.array(offset)
-        pose2 = self.right.get_state()["pose"] + np.array(offset)
+        """Move both arms by the same offset from current positions"""
+        left_state = self.left.get_state()
+        right_state = self.right.get_state()
 
-        self.left.moveL_ee(pose1)
-        self.right.moveL_ee(pose2)
+        if left_state and right_state:
+            pose1 = left_state["pose"] + np.array(offset)
+            pose2 = right_state["pose"] + np.array(offset)
+
+            self.left.moveL_ee(pose1)
+            self.right.moveL_ee(pose2)
+
+    def move_L_world(self, left_world_pose, right_world_pose):
+        """Move both arms to world coordinates simultaneously"""
+        self.left.moveL_world(left_world_pose)
+        self.right.moveL_world(right_world_pose)
 
     def move_J(self, left_joints, right_joints):
         """Move both arms to different joint positions simultaneously"""
@@ -150,19 +75,7 @@ class DualArmController:
         """Check if either arm is moving"""
         return self.left.is_moving() or self.right.is_moving()
 
-    def plot(self):
-        """Generate plots for both arms"""
-        self.left.plot()
-        self.right.plot()
-        # Rename the plots
-        import os
-
-        if os.path.exists("robot_plot.png"):
-            os.rename("robot_plot.png", "left_arm_plot.png")
-        self.right.plot()
-        if os.path.exists("robot_plot.png"):
-            os.rename("robot_plot.png", "right_arm_plot.png")
-        print("Plots saved: left_arm_plot.png, right_arm_plot.png")
+    def execute_grasping_from_stream(self, grasping_port=5557, timeout=30.0):
         """Subscribe to grasping points and execute coordinated movement"""
         # ZMQ subscriber for grasping points
         context = zmq.Context()
@@ -232,16 +145,14 @@ class DualArmController:
             subscriber.close()
             context.term()
 
+    def plot(self):
+        """Generate plots for both arms"""
+        self.left.plot()
+        self.right.plot()
+        print("Plots saved for both robots")
+
     def disconnect(self):
         """Disconnect both arms and cleanup"""
-        # Stop publishing first
-        if self.publish_states:
-            self.stop_publishing()
-            self.left_publisher.close()
-            self.right_publisher.close()
-            self.context.term()
-
-        # Disconnect robots
         self.left.disconnect()
         self.right.disconnect()
         print("Both arms disconnected")
@@ -252,16 +163,23 @@ def run_test_case():
     dual = DualArmController(
         left_ip="192.168.1.33",
         right_ip="192.168.1.66",
-        publish_states=True,
-        left_port=5556,
-        right_port=5559,
     )
 
     try:
+        print("Homing robots...")
         dual.go_home()
         dual.wait_for_all()
-        # dual.move_L_offset([0.05, 0, -0.3, 0, 0, 0])
-        # dual.wait_for_all()
+        print("Both arms at home")
+
+        # Test offset movement
+        print("Testing offset movement...")
+        dual.move_L_offset([0.05, 0, -0.05, 0, 0, 0])
+        dual.wait_for_all()
+        print("Offset movement complete")
+
+        # Keep running for state publishing test
+        print("Publishing states for 10 seconds...")
+        time.sleep(10)
 
     finally:
         dual.disconnect()
@@ -272,9 +190,6 @@ def run_grasping_case():
     dual = DualArmController(
         left_ip="192.168.1.33",
         right_ip="192.168.1.66",
-        publish_states=True,
-        left_port=5556,
-        right_port=5559,
     )
 
     try:

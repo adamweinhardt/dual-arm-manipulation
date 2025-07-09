@@ -26,22 +26,22 @@ class Box:
 
 @dataclass
 class FacePair:
+    face0_center: np.ndarray
     face1_center: np.ndarray
-    face2_center: np.ndarray
+    face0_normal: np.ndarray
     face1_normal: np.ndarray
-    face2_normal: np.ndarray
     pair_type: str
 
 
 @dataclass
 class GraspingPair:
     box_id: str
+    grasping_point0: np.ndarray
     grasping_point1: np.ndarray
-    grasping_point2: np.ndarray
+    normal0: np.ndarray
     normal1: np.ndarray
-    normal2: np.ndarray
+    approach_point0: np.ndarray
     approach_point1: np.ndarray
-    approach_point2: np.ndarray
     pair_type: str
     confidence: float
     total_distance: float
@@ -206,13 +206,13 @@ class GraspingPointsCalculator:
             ("top", "bottom", "top_bottom_Z_axis"),
         ]
 
-        for face1_name, face2_name, pair_type in opposing_pairs:
+        for face0_name, face1_name, pair_type in opposing_pairs:
             pairs.append(
                 FacePair(
+                    face0_center=face_centers[face0_name],
                     face1_center=face_centers[face1_name],
-                    face2_center=face_centers[face2_name],
+                    face0_normal=face_normals[face0_name],
                     face1_normal=face_normals[face1_name],
-                    face2_normal=face_normals[face2_name],
                     pair_type=pair_type,
                 )
             )
@@ -221,22 +221,22 @@ class GraspingPointsCalculator:
 
     def get_approach_points(
         self,
+        grasp_point0: np.ndarray,
         grasp_point1: np.ndarray,
-        grasp_point2: np.ndarray,
+        normal0: np.ndarray,
         normal1: np.ndarray,
-        normal2: np.ndarray,
         offset: float = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         if offset is None:
             offset = self.approach_offset
 
+        normal0_unit = normal0 / np.linalg.norm(normal0)
         normal1_unit = normal1 / np.linalg.norm(normal1)
-        normal2_unit = normal2 / np.linalg.norm(normal2)
 
+        approach_point0 = grasp_point0 + normal0_unit * offset
         approach_point1 = grasp_point1 + normal1_unit * offset
-        approach_point2 = grasp_point2 + normal2_unit * offset
 
-        return approach_point1, approach_point2
+        return approach_point0, approach_point1
 
     def calculate_face_robot_distances(self, face_center: np.ndarray) -> List[float]:
         """Calculate distances from a face center to all robot bases"""
@@ -260,34 +260,34 @@ class GraspingPointsCalculator:
         best_analysis = None
 
         for i, pair in enumerate(all_pairs):
+            face0_distances = self.calculate_face_robot_distances(pair.face0_center)
             face1_distances = self.calculate_face_robot_distances(pair.face1_center)
-            face2_distances = self.calculate_face_robot_distances(pair.face2_center)
 
-            assignment1_score = face1_distances[0] + face2_distances[1]
-            assignment2_score = face2_distances[0] + face1_distances[1]
+            assignment0_score = face0_distances[0] + face1_distances[1]
+            assignment1_score = face1_distances[0] + face0_distances[1]
 
-            if assignment1_score < assignment2_score:
-                total_distance = assignment1_score
+            if assignment0_score < assignment1_score:
+                total_distance = assignment0_score
                 robot_assignment = {
                     "0": pair.pair_type.split("_")[0],
                     "1": pair.pair_type.split("_")[1],
                 }
-                # Robot 0 gets face1, Robot 1 gets face2
-                robot0_face_center = pair.face1_center
-                robot0_normal = pair.face1_normal
-                robot1_face_center = pair.face2_center
-                robot1_normal = pair.face2_normal
+                # Robot 0 gets face0, Robot 1 gets face1
+                robot0_face_center = pair.face0_center
+                robot0_normal = pair.face0_normal
+                robot1_face_center = pair.face1_center
+                robot1_normal = pair.face1_normal
             else:
-                total_distance = assignment2_score
+                total_distance = assignment1_score
                 robot_assignment = {
                     "0": pair.pair_type.split("_")[1],
                     "1": pair.pair_type.split("_")[0],
                 }
-                # Robot 0 gets face2, Robot 1 gets face1
-                robot0_face_center = pair.face2_center
-                robot0_normal = pair.face2_normal
-                robot1_face_center = pair.face1_center
-                robot1_normal = pair.face1_normal
+                # Robot 0 gets face1, Robot 1 gets face0
+                robot0_face_center = pair.face1_center
+                robot0_normal = pair.face1_normal
+                robot1_face_center = pair.face0_center
+                robot1_normal = pair.face0_normal
 
             if total_distance < best_score:
                 best_score = total_distance
@@ -320,12 +320,12 @@ class GraspingPointsCalculator:
 
         return GraspingPair(
             box_id=str(box.id),
-            grasping_point1=robot0_grasp_point,  # Always robot 0
-            grasping_point2=robot1_grasp_point,  # Always robot 1
-            normal1=robot0_normal,  # Always robot 0
-            normal2=robot1_normal,  # Always robot 1
-            approach_point1=approach_point0,  # Always robot 0
-            approach_point2=approach_point1,  # Always robot 1
+            grasping_point0=robot0_grasp_point,  # Always robot 0
+            grasping_point1=robot1_grasp_point,  # Always robot 1
+            normal0=robot0_normal,  # Always robot 0
+            normal1=robot1_normal,  # Always robot 1
+            approach_point0=approach_point0,  # Always robot 0
+            approach_point1=approach_point1,  # Always robot 1
             pair_type=best_pair.pair_type,
             confidence=float(box.confidence),
             total_distance=float(best_analysis["total_distance"]),
@@ -399,12 +399,12 @@ class GraspingPointsPublisher:
 
                         if grasping_pair:
                             grasping_data[grasping_pair.box_id] = {
-                                "grasping_point1": grasping_pair.grasping_point1.tolist(),  # always robot 0
-                                "grasping_point2": grasping_pair.grasping_point2.tolist(),  # always robot 1
-                                "normal1": grasping_pair.normal1.tolist(),  # always robot 0
-                                "normal2": grasping_pair.normal2.tolist(),  # always robot 1
-                                "approach_point1": grasping_pair.approach_point1.tolist(),  # always robot 0
-                                "approach_point2": grasping_pair.approach_point2.tolist(),  # always robot 1
+                                "grasping_point0": grasping_pair.grasping_point0.tolist(),  # always robot 0
+                                "grasping_point1": grasping_pair.grasping_point1.tolist(),  # always robot 1
+                                "normal0": grasping_pair.normal0.tolist(),  # always robot 0
+                                "normal1": grasping_pair.normal1.tolist(),  # always robot 1
+                                "approach_point0": grasping_pair.approach_point0.tolist(),  # always robot 0
+                                "approach_point1": grasping_pair.approach_point1.tolist(),  # always robot 1
                                 "approach_offset": self.calculator.approach_offset,
                                 "pair_type": grasping_pair.pair_type,
                                 "confidence": grasping_pair.confidence,

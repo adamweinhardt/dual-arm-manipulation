@@ -2,6 +2,7 @@ import time
 import threading
 import numpy as np
 import zmq
+import os
 import datetime
 import matplotlib.pyplot as plt
 from ur_controller import URController
@@ -114,16 +115,19 @@ class URForceController(URController):
         box_id = list(self.current_grasping_data.keys())[0]
         grasping_info = self.current_grasping_data[box_id]
 
-        if self.robot_id == 1:
+        if self.robot_id == 0:
+            grasping_point = grasping_info.get("grasping_point0")
+            approach_point = grasping_info.get("approach_point0")
+            normal_vector = grasping_info.get("normal0")
+        elif self.robot_id == 1:
             grasping_point = grasping_info.get("grasping_point1")
             approach_point = grasping_info.get("approach_point1")
             normal_vector = grasping_info.get("normal1")
-        elif self.robot_id == 0:
-            grasping_point = grasping_info.get("grasping_point2")
-            approach_point = grasping_info.get("approach_point2")
-            normal_vector = grasping_info.get("normal2")
         else:
             return None, None
+
+        print(f"Normal0: ", grasping_info.get("normal0"))
+        print(f"Normal1: ", grasping_info.get("normal1"))
 
         if approach_point is None or normal_vector is None:
             return None, None
@@ -145,10 +149,10 @@ class URForceController(URController):
 
         world_rotation = rotmat_to_rvec(rotation_matrix)
 
-        print(f"Normal vector: {normal}")  # Add this
-        print(f"Normal magnitude: {np.linalg.norm(normal)}")
-        print(f"Rotation matrix:\n{rotation_matrix}")
-        print(f"World rotation (rvec): {world_rotation}")
+        # print(f"Normal vector: {normal}")  # Add this
+        # print(f"Normal magnitude: {np.linalg.norm(normal)}")
+        # print(f"Rotation matrix:\n{rotation_matrix}")
+        # print(f"World rotation (rvec): {world_rotation}")
 
         world_pose = [
             approach_point[0],
@@ -213,24 +217,24 @@ class URForceController(URController):
 
         return True
 
-    def control_to_target(
-        self,
-        reference_force=None,
-        distance_cap=0.2,
-        timeout=30.0,
-    ):
+    def control_to_target(self, reference_force=None, distance_cap=0.2, timeout=30.0):
         if self.control_active:
             print("Control already active!")
             return False
 
         target_position, _, normal = self.get_grasping_data()
-        direction = np.array(-normal, dtype=float)
+
+        if self.robot_id == 0:
+            direction = -np.array(normal, dtype=float)
+        else:
+            direction = np.array(normal, dtype=float)
+
         direction = direction / np.linalg.norm(direction)
 
+        print(f"Robot {self.robot_id} - FINAL DIRECTION: {direction}")
+
         current_state = self.get_state()
-        self.start_position = np.array(currentarget(
-            reference_force=10.0,
-            distance_cap=1_state["pose"][:3])
+        self.start_position = np.array(current_state["pose"][:3])
 
         if target_position is None:
             self.target_position = self.start_position.copy()
@@ -308,7 +312,7 @@ class URForceController(URController):
                 position_in_direction = np.dot(
                     current_position - self.target_position, self.control_direction
                 )
-                position_error = -position_in_direction
+                position_error = position_in_direction
                 position_output = self.pose_pid.update(position_error)
 
                 total_output = force_output + position_output
@@ -419,32 +423,21 @@ class URForceController(URController):
             for pos, target in zip(positions, target_positions)
         ]
 
-        # Force and Position Errors for Total Error Calculation
         force_errors_val = np.array(
             [ref - abs(f_dir) for ref, f_dir in zip(ref_forces, force_in_direction)]
         )
 
-        # For simplicity in total error, let's consider the magnitude of the position error
-        # (This can be adjusted based on how you define "total error")
         position_errors_magnitude = np.linalg.norm(positions - target_positions, axis=1)
 
-        # Define "Total Error" - for demonstration, sum of absolute force error and position error magnitude
-        # You might want to normalize or weight these errors based on their units and importance.
-        total_errors = np.abs(force_errors_val) + np.abs(
-            position_errors_magnitude
-        )  # Example total error
+        total_errors = np.abs(force_errors_val) + np.abs(position_errors_magnitude)
 
-        # --- Dynamic Plot Title Information ---
-        current_datetime = datetime.datetime.now().strftime(
-            "%Y-%m-%d_%H-%M-%S"
-        )  # Use the initial target_position for the plot title
+        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         initial_target_pose_str = f"[{self.target_position[0]:.3f}, {self.target_position[1]:.3f}, {self.target_position[2]:.3f}]"
 
         force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
         pose_pid_str = f"Kp={self.pose_pid.kp:.3f}, Ki={self.pose_pid.ki:.3f}, Kd={self.pose_pid.kd:.3f}"
 
-        # Create comprehensive plot (now 2 rows, 3 columns)
-        plt.figure(figsize=(18, 10))  # Adjusted figure size for 2 rows
+        plt.figure(figsize=(18, 10))
 
         # Main title for the entire figure
         plt.suptitle(
@@ -619,7 +612,10 @@ class URForceController(URController):
         )  # Adjust rect to make space for suptitle
 
         # Save filename with date
-        filename = f"plots/comprehensive_control_plot_{current_datetime}.png"
+        filename = (
+            f"plots/comprehensive_control_plot_{current_datetime}_{self.robot_id}.png"
+        )
+        os.makedirs("plots", exist_ok=True)
         plt.savefig(filename, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -686,15 +682,26 @@ class URForceController(URController):
 if __name__ == "__main__":
     hz = 50
 
-    kp_f = 0.005
-    ki_f = 0.000
-    kd_f = 0.0001
+    kp_f = 0.001
+    ki_f = 0.0
+    kd_f = 0.0
 
-    kp_p = 0.5
-    ki_p = 0.2
-    kd_p = 0.002
+    kp_p = 0.03
+    ki_p = 0.005
+    kd_p = 0.0
 
-    robot1 = URForceController(
+    robotL = URForceController(
+        "192.168.1.33",
+        hz=hz,
+        kp_f=kp_f,
+        ki_f=ki_f,
+        kd_f=kd_f,
+        kp_p=kp_p,
+        ki_p=ki_p,
+        kd_p=kd_p,
+    )
+
+    robotR = URForceController(
         "192.168.1.66",
         hz=hz,
         kp_f=kp_f,
@@ -704,37 +711,45 @@ if __name__ == "__main__":
         ki_p=ki_p,
         kd_p=kd_p,
     )
-    # robot2 = URForceController("192.168.1.33", hz=hz, kp=kp, ki=ki, kd=kd)
 
     try:
-        robot1.go_to_approach()
-        print("\nStarting force control...")
-        robot1.control_to_target(
+        robotR.go_to_approach()
+        robotL.go_to_approach()
+
+        robotR.wait_for_commands()
+        robotL.wait_for_commands()
+        robotR.wait_until_done()
+        robotL.wait_until_done()
+
+        time.sleep(0.1)
+
+        robotR.control_to_target(
             reference_force=10.0,
-            distance_cap=1,
-            timeout=20.0,
+            distance_cap=0.30,
+            timeout=15.0,
         )
 
-        # print("\nStarting force control...")
-        # robot2.force_control_to_target(
-        #     reference_force=8.0,reference_force
-        #     direction=[0, 1, 0],
-        #     distance_cap=0.2,
-        #     timeout=20.0,
-        # )
+        robotL.control_to_target(
+            reference_force=10.0,
+            distance_cap=0.30,
+            timeout=15.0,
+        )
 
-        robot1.wait_for_control()
-        # # robot2.wait_for_force_control()
+        robotR.wait_for_control()
+        robotL.wait_for_control()
 
-        # print("Force control complete!")
-        # print("Final force reading:", robot1.get_current_force())
-
-        robot1.plot_data()
-        # robot2.plot_force_data()
+        robotR.plot_data()
+        robotL.plot_data()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        robotR.stop_control()
+        robotL.stop_control()
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        robotR.stop_control()
+        robotL.stop_control()
     finally:
-        robot1.disconnect()
-        # robot2.disconnect()
+        robotR.disconnect()
+        robotL.disconnect()
         print("Robot disconnected")
