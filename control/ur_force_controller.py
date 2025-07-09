@@ -126,9 +126,6 @@ class URForceController(URController):
         else:
             return None, None
 
-        print(f"Normal0: ", grasping_info.get("normal0"))
-        print(f"Normal1: ", grasping_info.get("normal1"))
-
         if approach_point is None or normal_vector is None:
             return None, None
 
@@ -148,11 +145,6 @@ class URForceController(URController):
         rotation_matrix = end_effector_rotation_from_normal(-normal)
 
         world_rotation = rotmat_to_rvec(rotation_matrix)
-
-        # print(f"Normal vector: {normal}")  # Add this
-        # print(f"Normal magnitude: {np.linalg.norm(normal)}")
-        # print(f"Rotation matrix:\n{rotation_matrix}")
-        # print(f"World rotation (rvec): {world_rotation}")
 
         world_pose = [
             approach_point[0],
@@ -224,17 +216,14 @@ class URForceController(URController):
 
         target_position, _, normal = self.get_grasping_data()
 
-        if self.robot_id == 0:
-            direction = -np.array(normal, dtype=float)
-        else:
-            direction = np.array(normal, dtype=float)
+        direction = -np.array(normal, dtype=float)  # into the surface
 
         direction = direction / np.linalg.norm(direction)
 
         print(f"Robot {self.robot_id} - FINAL DIRECTION: {direction}")
 
         current_state = self.get_state()
-        self.start_position = np.array(current_state["pose"][:3])
+        self.start_position = np.array(current_state["pose_world"][:3])
 
         if target_position is None:
             self.target_position = self.start_position.copy()
@@ -288,37 +277,70 @@ class URForceController(URController):
                     print("ERROR: Invalid robot state, stopping control")
                     break
 
-                current_force_vector = np.array(current_state["force"][:3])
-                current_position = np.array(current_state["pose"][:3])
-
+                current_force_vector = np.array(current_state["filtered_force"][:3])
+                current_position = np.array(current_state["pose_world"][:3])
                 # Log data
-                data_point = {
-                    "timestamp": time.time() - self.start_time,
-                    "force_vector": current_force_vector.copy(),
-                    "position": current_position.copy(),
-                    "target_position": self.target_position.copy(),
-                    "reference_force": self.ref_force,
-                }
-                self.control_data.append(data_point)
 
                 # === FORCE CONTROL ===
-                force_in_direction = np.dot(
-                    current_force_vector, self.control_direction
-                )
-                force_error = self.ref_force - abs(force_in_direction)
+                # force_in_direction = np.dot(
+                #     current_force_vector, self.control_direction
+                # )
+                # force_error = self.ref_force + force_in_direction
+                # force_output = self.force_pid.update(force_error)
+
+                force_magnitude = np.linalg.norm(current_force_vector)
+                force_error = self.ref_force - force_magnitude
                 force_output = self.force_pid.update(force_error)
 
                 # === POSITION CONTROL ===
                 position_in_direction = np.dot(
                     current_position - self.target_position, self.control_direction
                 )
-                position_error = position_in_direction
+                position_error = -position_in_direction
                 position_output = self.pose_pid.update(position_error)
 
                 total_output = force_output + position_output
 
                 velocity = self.control_direction * total_output
                 speed_command = [velocity[0], velocity[1], velocity[2], 0, 0, 0]
+
+                if self.robot_id == 1:
+                    print(f"=== FULL POSITION DEBUG ===")
+                    print(f"Current position world: {current_position}")
+                    print(f"Target position: {self.target_position}")
+                    print(f"Raw difference: {current_position - self.target_position}")
+                    print(f"Control direction: {self.control_direction}")
+                    print(
+                        f"Dot product (position_in_direction): {position_in_direction}"
+                    )
+                    print(f"Position error (-dot_product): {position_error}")
+                    print(f"Force output: {force_output}")
+                    print(f"Position output (PID): {position_output}")
+                    print(f"Total output (force + pos): {total_output}")
+                    print(f"Velocity (direction * total): {velocity}")
+                    print(f"Speed command: {speed_command}")
+                    print(
+                        f"Expected movement direction: {self.target_position - current_position}"
+                    )
+                    print(
+                        f"PID gains: kp={self.pose_pid.kp}, ki={self.pose_pid.ki}, kd={self.pose_pid.kd}"
+                    )
+                    print(
+                        f"Force vs Position contribution: F={force_output:.4f}, P={position_output:.4f}"
+                    )
+                    print("===================")
+
+                data_point = {
+                    "timestamp": time.time() - self.start_time,
+                    "force_vector": current_force_vector.copy(),
+                    "position": current_position.copy(),
+                    "target_position": self.target_position.copy(),
+                    "reference_force": self.ref_force,
+                    "force_output": force_output,
+                    "position_output": position_output,
+                    "total_output": total_output,
+                }
+                self.control_data.append(data_point)
 
                 # Safety checks
                 distance_moved = np.linalg.norm(current_position - self.start_position)
@@ -330,12 +352,12 @@ class URForceController(URController):
                     print(f"Control timeout reached")
                     break
 
-                self.speedL(speed_command, acceleration=0.1, time_duration=0.1)
+                self.speedL_world(speed_command, acceleration=0.1, time_duration=0.1)
 
                 # Debug output (every 1 second)
                 if int(time.time() * 1) % 1 == 0 and int(time.time() * 10) % 10 == 0:
                     print(
-                        f"Force: {force_in_direction:.2f}N (target: {self.ref_force}N), "
+                        f"Force: {force_magnitude:.2f}N (target: {self.ref_force}N), "
                         f"Pos error: {position_error:.3f}m, "
                         f"Combined output: {total_output:.3f}, "
                         f"Distance: {distance_moved:.3f}m"
@@ -430,6 +452,10 @@ class URForceController(URController):
         position_errors_magnitude = np.linalg.norm(positions - target_positions, axis=1)
 
         total_errors = np.abs(force_errors_val) + np.abs(position_errors_magnitude)
+
+        force_outputs = np.array([d["force_output"] for d in self.control_data])
+        position_outputs = np.array([d["position_output"] for d in self.control_data])
+        total_outputs = force_outputs + position_outputs
 
         current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         initial_target_pose_str = f"[{self.target_position[0]:.3f}, {self.target_position[1]:.3f}, {self.target_position[2]:.3f}]"
@@ -593,17 +619,24 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
 
         # 6. Total Error Plot (NEW)
-        plt.subplot(2, 3, 6)  # Changed to 2 rows, 3 columns, plot 6
+        plt.subplot(2, 3, 6)
+        plt.plot(
+            timestamps, force_outputs, label="Force Output", linewidth=2, color="red"
+        )
         plt.plot(
             timestamps,
-            total_errors,
-            label="Total Error (Abs Force + Abs Pos)",
+            position_outputs,
+            label="Position Output",
             linewidth=2,
-            color="darkblue",
+            color="blue",
         )
-        plt.title("Total Control Error")
+        plt.plot(
+            timestamps, total_outputs, label="Total Output", linewidth=2, color="purple"
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("Control Outputs")
         plt.xlabel("Time (s)")
-        plt.ylabel("Total Error")
+        plt.ylabel("Control Output")
         plt.legend()
         plt.grid(True, alpha=0.3)
 
@@ -682,13 +715,15 @@ class URForceController(URController):
 if __name__ == "__main__":
     hz = 50
 
-    kp_f = 0.001
-    ki_f = 0.0
+    kp_f = 0.00
+    ki_f = 0.00
     kd_f = 0.0
 
-    kp_p = 0.03
-    ki_p = 0.005
+    kp_p = 0.4
+    ki_p = 0.0
     kd_p = 0.0
+
+    alpha = 0
 
     robotL = URForceController(
         "192.168.1.33",
@@ -711,6 +746,8 @@ if __name__ == "__main__":
         ki_p=ki_p,
         kd_p=kd_p,
     )
+    robotL.alpha = alpha
+    robotR.alpha = alpha
 
     try:
         robotR.go_to_approach()
@@ -726,14 +763,14 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=10.0,
             distance_cap=0.30,
-            timeout=15.0,
+            timeout=5.0,
         )
 
-        robotL.control_to_target(
-            reference_force=10.0,
-            distance_cap=0.30,
-            timeout=15.0,
-        )
+        # robotL.control_to_target(
+        #     reference_force=10.0,
+        #     distance_cap=0.30,
+        #     timeout=5.0,
+        # )
 
         robotR.wait_for_control()
         robotL.wait_for_control()

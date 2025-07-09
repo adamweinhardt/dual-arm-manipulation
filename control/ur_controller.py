@@ -76,6 +76,8 @@ class URController(threading.Thread):
         self.default_joint_acceleration = 1.4
 
         # Data recording
+        self.previous_force = None
+        self.alpha = 0.75
         self.data = []
 
         # Start the control thread
@@ -142,6 +144,9 @@ class URController(threading.Thread):
                         "pos": to_list(robot_state.get("pose", [])),
                         "vel": to_list(robot_state.get("speed", [])),
                         "force": to_list(robot_state.get("force", [])),
+                        "filtered_force": to_list(
+                            robot_state.get("filtered_force", [])
+                        ),
                         "pose_world": to_list(robot_state.get("pose_world", [])),
                     }
 
@@ -173,23 +178,17 @@ class URController(threading.Thread):
         """Add a movement command to the execution queue"""
         self.command_queue.put(command)
 
-    def moveL_ee(self, pose):
-        command = lambda: self.rtde_control.moveL(
-            pose, self.default_speed, self.default_acceleration
-        )
-        self._queue_command(command)
-
-    def world_2_robot_pose(self, world_pose_6d, robot_base_transform):
+    def world_2_robot(self, world_pose, robot_to_world):
         """Convert world pose to robot coordinate frame"""
         # Ensure we have a numpy array
-        world_pose_6d = np.array(world_pose_6d)
+        world_pose = np.array(world_pose)
 
         world_T = np.eye(4)
-        world_T[:3, 3] = world_pose_6d[:3]
-        world_T[:3, :3] = rvec_to_rotmat(world_pose_6d[3:])
+        world_T[:3, 3] = world_pose[:3]
+        world_T[:3, :3] = rvec_to_rotmat(world_pose[3:])
 
-        robot_base_inv = np.linalg.inv(robot_base_transform)
-        robot_T = robot_base_inv @ world_T
+        world_to_robot = np.linalg.inv(robot_to_world)
+        robot_T = world_to_robot @ world_T
 
         robot_pos = robot_T[:3, 3]
         robot_rvec = rotmat_to_rvec(robot_T[:3, :3])
@@ -205,57 +204,77 @@ class URController(threading.Thread):
             ]
         )
 
-    def moveL_world(self, world_pose_6d):
-        if self.robot_config is None:
-            print(f"ERROR: No robot configuration loaded for IP {self.ip}")
-            return False
+    def robot_2_world(self, local_pose, robot_to_world):
+        local_pose_6d = np.array(local_pose)
 
-        if isinstance(world_pose_6d, np.ndarray):
-            world_pose_6d = world_pose_6d.tolist()
+        local_T = np.eye(4)
+        local_T[:3, 3] = local_pose_6d[:3]  # Position
+        local_T[:3, :3] = rvec_to_rotmat(local_pose_6d[3:])  # Rotation
 
-        if len(world_pose_6d) != 6:
-            print(
-                f"ERROR: world_pose_6d must have 6 elements, got {len(world_pose_6d)}"
-            )
-            return False
+        world_T = robot_to_world @ local_T
+
+        world_pos = world_T[:3, 3]
+        world_rvec = rotmat_to_rvec(world_T[:3, :3])
+
+        return np.array(
+            [
+                world_pos[0],
+                world_pos[1],
+                world_pos[2],
+                world_rvec[0],
+                world_rvec[1],
+                world_rvec[2],
+            ]
+        )
+
+    def moveL(self, pose_ee):
+        command = lambda: self.rtde_control.moveL(
+            pose_ee, self.default_speed, self.default_acceleration
+        )
+        self._queue_command(command)
+
+    def moveL_world(self, pose_world):
+        if isinstance(pose_world, np.ndarray):
+            pose_world = pose_world.tolist()
 
         try:
-            robot_pose_6d = self.world_2_robot_pose(world_pose_6d, self.robot_config)
+            pose_ee = self.world_2_robot(pose_world, self.robot_config)
 
-            self.moveL_ee(robot_pose_6d)
+            self.moveL(pose_ee)
 
         except Exception as e:
             print(f"ERROR in moveL_world: {e}")
 
-    def moveL_gripper_world(self, gripper_world_pose_6d):
-        if self.robot_config is None:
-            print(f"ERROR: No robot configuration loaded for IP {self.ip}")
-            return False
-
-        if not hasattr(self, "ee2marker"):
-            print(f"ERROR: ee2marker calibration not loaded for robot {self.robot_id}")
-            return False
-
-        # Ensure we have a numpy array
-        gripper_world_pose_6d = np.array(gripper_world_pose_6d)
-
-        if len(gripper_world_pose_6d) != 6:
-            print(
-                f"ERROR: gripper_world_pose_6d must have 6 elements, got {len(gripper_world_pose_6d)}"
-            )
-            return False
+    def moveL_gripper_world(self, TCP_world):
+        TCP_world = np.array(TCP_world)
 
         try:
-            self.moveL_world(gripper_world_pose_6d + self.ee2marker_offset)
+            self.moveL_world(TCP_world + self.ee2marker_offset)
 
         except Exception as e:
             print(f"ERROR in moveL_gripper_world: {e}")
 
-    def speedL(self, speed_vector, acceleration=0.5, time_duration=0.1):
+    def speedL(self, speed_ee, acceleration=0.5, time_duration=0.1):
         command = lambda: self.rtde_control.speedL(
-            speed_vector, acceleration, time_duration
+            speed_ee, acceleration, time_duration
         )
         self._queue_command(command)
+
+    def speedL_world(self, speed_world, acceleration=0.5, time_duration=0.1):
+        if isinstance(speed_world, np.ndarray):
+            speed_world = speed_world.tolist()
+
+        try:
+            speed_ee = self.world_2_robot(speed_world, self.robot_config)
+
+            speed_command = [speed_ee[0], speed_ee[1], speed_ee[2], 0, 0, 0]
+
+            self.speedL(
+                speed_command, acceleration=acceleration, time_duration=time_duration
+            )
+
+        except Exception as e:
+            print(f"ERROR in moveL_world: {e}")
 
     def speedStop(self):
         command = lambda: self.rtde_control.speedStop()
@@ -273,15 +292,26 @@ class URController(threading.Thread):
         )
         self._queue_command(command)
 
+    def force_low_pass_filter(self, previous_force, current_force, alpha):
+        if previous_force is None:
+            return current_force
+        return (1 - alpha) * current_force + alpha * previous_force
+
     def get_state(self):
         pose = self.rtde_receive.getActualTCPPose()
-        pose_world = self.world_2_robot_pose(pose, self.robot_config)
+        pose_world = self.robot_2_world(pose, self.robot_config)
+        force = np.array(self.rtde_receive.getActualTCPForce())
+        filtered_force = self.force_low_pass_filter(
+            self.previous_force, force, self.alpha
+        )
+        self.previous_force = force
         return {
             "pose": pose,
             "pose_world": pose_world,
             "joints": self.rtde_receive.getActualQ(),
             "speed": self.rtde_receive.getActualTCPSpeed(),
-            "force": self.rtde_receive.getActualTCPForce(),
+            "force": force,
+            "filtered_force": filtered_force,
         }
 
     def is_moving(self):
