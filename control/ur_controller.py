@@ -16,7 +16,7 @@ from robot_ipc_control.pose_estimation.transform_utils import (
 
 
 class URController(threading.Thread):
-    def __init__(self, ip):
+    def __init__(self, ip, hz=50):
         super().__init__(daemon=True)
         self.ip = ip
 
@@ -26,7 +26,7 @@ class URController(threading.Thread):
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
             )
             self.port = 5559
-            self.ee2marker_offset = np.array([0.035, 0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset = np.array([0.02, 0.05753, -0.10, 0, 0, 0])
 
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
@@ -34,7 +34,7 @@ class URController(threading.Thread):
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
             )
             self.port = 5556
-            self.ee2marker_offset = np.array([-0.035, -0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset = np.array([-0.02, -0.05753, -0.10, 0, 0, 0])
         else:
             self.robot_id = None
             self.robot_config = None
@@ -50,7 +50,7 @@ class URController(threading.Thread):
         self._stop_event = threading.Event()
 
         # State publisher
-        self.hz = None
+        self.hz = hz
         self.publishing = False
         self.context = zmq.Context()
         self.publisher = self.context.socket(zmq.PUB)

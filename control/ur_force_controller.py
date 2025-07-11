@@ -114,6 +114,8 @@ class URForceController(URController):
         super().__init__(ip)
 
         self.control_active = False
+        self.lifting = False
+        self.lifting_offset = [0, 0, 0.2]
         self.control_thread = None
         self.control_stop = threading.Event()
 
@@ -291,6 +293,10 @@ class URForceController(URController):
         """Main 3D vector PID control loop"""
         control_period = 1.0 / self.control_rate_hz
 
+        self.lifting_applied = False
+        self.side_applied = False
+        self.down_applied = False
+
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.time()
 
@@ -302,14 +308,42 @@ class URForceController(URController):
                 )
                 current_position = np.array(current_state["gripper_world"][:3])
 
+                # Safety checks
+                distance_moved = np.linalg.norm(current_position - self.start_position)
+                if distance_moved >= self.distance_cap:
+                    print(f"Distance cap reached: {distance_moved:.3f}m")
+                    break
+
+                if time.time() - self.start_time >= self.control_timeout:
+                    print(f"Control timeout reached")
+                    break
+
+                if self.lifting and not self.lifting_applied:
+                    if time.time() - self.start_time >= self.control_timeout - 45:
+                        print("Lifting phase has started.")
+                        self.target_position = (
+                            self.target_position + self.lifting_offset
+                        )
+                        self.ref_force += 20
+                        self.lifting_applied = True
+
+                if self.lifting and not self.side_applied:
+                    if time.time() - self.start_time >= self.control_timeout - 30:
+                        print("Side phase has started.")
+                        self.target_position = self.target_position + [-0.2, 0, 0]
+                        self.side_applied = True
+
+                if self.lifting and not self.down_applied:
+                    if time.time() - self.start_time >= self.control_timeout - 15:
+                        print("Lifting phase has started.")
+                        self.target_position = self.target_position + [0, 0, -0.2]
+                        self.down_applied = True
+
                 # === 3D FORCE CONTROL ===
                 if np.isscalar(self.ref_force):
-                    ref_force_vector = self.ref_force * (
-                        -self.control_direction
-                    )  # TODO check the sign
+                    ref_force_vector = self.ref_force * (-self.control_direction)
                 else:
                     ref_force_vector = np.array(self.ref_force)
-
                 force_error_vector = ref_force_vector - current_force_vector
                 force_output_vector = self.force_pid.update(force_error_vector)
 
@@ -344,38 +378,7 @@ class URForceController(URController):
                 }
                 self.control_data.append(data_point)
 
-                # Safety checks
-                distance_moved = np.linalg.norm(current_position - self.start_position)
-                if distance_moved >= self.distance_cap:
-                    print(f"Distance cap reached: {distance_moved:.3f}m")
-                    break
-
-                if time.time() - self.start_time >= self.control_timeout:
-                    print(f"Control timeout reached")
-                    break
-
                 self.speedL_world(speed_command, acceleration=0.1, time_duration=0.1)
-
-                # # Debug output (every 1 second)
-                # if int(time.time() * 1) % 1 == 0 and int(time.time() * 10) % 10 == 0:
-                #     print("-------")
-                #     print(f"Reference force (scalar): {self.ref_force}")
-                #     print(f"Control direction (negated): {-self.control_direction}")
-                #     print(f"Reference force vector: {ref_force_vector}")
-                #     print(f"Current force vector: {current_force_vector}")
-                #     print(f"Force error vector: {force_error_vector}")
-                #     print(f"Force PID output vector: {force_output_vector}")
-
-                #     print(f"Current position: {current_position}")
-                #     print(f"Target position: {self.target_position}")
-                #     print(f"Position error vector: {position_error_vector}")
-                #     print(f"Position PID output vector: {position_output_vector}")
-
-                #     print(
-                #         f"Total output vector (force + position): {total_output_vector}"
-                #     )
-                #     print(f"Speed command [vx, vy, vz, wx, wy, wz]: {speed_command}")
-                #     print("-------")
 
             except Exception as e:
                 print(f"Control error: {e}")
@@ -1387,6 +1390,8 @@ if __name__ == "__main__":
     )
     robotL.alpha = alpha
     robotR.alpha = alpha
+    robotL.lifting = True
+    robotR.lifting = True
 
     try:
         robotL.moveJ(
@@ -1416,14 +1421,14 @@ if __name__ == "__main__":
 
         robotR.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.30,
-            timeout=15.0,
+            distance_cap=1.5,
+            timeout=60.0,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.30,
-            timeout=15.0,
+            distance_cap=1.5,
+            timeout=60.0,
         )
 
         robotR.wait_for_control()
