@@ -4,15 +4,15 @@ import numpy as np
 if __name__ == "__main__":
     hz = 50
 
-    kp_f = 0.0
+    kp_f = 0.005
     ki_f = 0.0
     kd_f = 0.0
 
-    kp_p = 1
+    kp_p = 0.3
     ki_p = 0.0
     kd_p = 0.0
 
-    alpha = 0.05
+    alpha = 0.0
 
     robot = URForceController(
         "192.168.1.66",
@@ -26,9 +26,12 @@ if __name__ == "__main__":
     )
     robot.alpha = alpha
 
-    offset = np.array([0.0, 0.0, -0.15])  # downwards
-    pose = np.array(robot.get_state()["pose"][:3])  # Get the current pose (x, y, z)
+    offset = np.array([0.0, 0.0, -0.10])  # downwards
+    pose = np.array(
+        robot.get_state()["pose_world"][:3]
+    )  # Get the current pose (x, y, z)
     ref_pose = pose + offset
+    print(pose)
     print(ref_pose)
 
     try:
@@ -41,10 +44,11 @@ if __name__ == "__main__":
         )
         robot.wait_for_control()
 
-        robot.plot_data()
+        robot.plot_data3D()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        robot.stop_control()
     finally:
         robot.disconnect()
         print("Robot disconnected")

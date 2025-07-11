@@ -74,14 +74,10 @@ class Visualizer:
                 state_data = socket.recv_json(flags=zmq.NOBLOCK)
 
                 if "Q" in state_data and "robot_id" in state_data:
-                    if not state_data["Q"]:
-                        continue
-
                     robot_id = state_data["robot_id"]
-                    robot_index = int(robot_id.split("_")[1])
 
-                    if robot_index < len(self.robot_names):
-                        robot_name = self.robot_names[robot_index]
+                    if robot_id < len(self.robot_names):
+                        robot_name = self.robot_names[robot_id]
 
                         try:
                             joint_positions = urtde_to_rai(state_data["Q"])

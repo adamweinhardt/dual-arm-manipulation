@@ -17,7 +17,7 @@ from robot_ipc_control.pose_estimation.transform_utils import (
 class PIDController:
     """Basic PID controller for force control"""
 
-    def __init__(self, kp=1.0, ki=0.0, kd=0.0, max_output=0.5, dt=0.02):
+    def __init__(self, kp=1.0, ki=0.0, kd=0.0, max_output=0.2, dt=0.02):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -59,6 +59,62 @@ class PIDController:
         self.last_time = time.time()
 
 
+class VectorPIDController:
+    """3D Vector PID Controller - separate PID for each axis"""
+
+    def __init__(self, kp, ki, kd):
+        """
+        Args:
+            kp, ki, kd: Can be scalars (same gains for all axes) or 3-element arrays
+        """
+        self.kp = np.array(kp) if not np.isscalar(kp) else np.array([kp, kp, kp])
+        self.ki = np.array(ki) if not np.isscalar(ki) else np.array([ki, ki, ki])
+        self.kd = np.array(kd) if not np.isscalar(kd) else np.array([kd, kd, kd])
+
+        self.integral = np.zeros(3)
+        self.last_error = None
+        self.last_time = None
+
+    def update(self, error_vector):
+        """
+        Args:
+            error_vector: 3D numpy array [ex, ey, ez]
+        Returns:
+            output_vector: 3D numpy array [ux, uy, uz]
+        """
+        error_vector = np.array(error_vector)
+        current_time = time.time()
+
+        if self.last_time is None:
+            dt = 0.01
+            derivative = np.zeros(3)
+        else:
+            dt = current_time - self.last_time
+            if dt <= 0:
+                dt = 0.01
+
+            if self.last_error is not None:
+                derivative = (error_vector - self.last_error) / dt
+            else:
+                derivative = np.zeros(3)
+
+        self.integral += error_vector * dt
+        self.integral = np.clip(self.integral, -1.0, 1.0)
+
+        output = self.kp * error_vector + self.ki * self.integral + self.kd * derivative
+
+        self.last_error = error_vector.copy()
+        self.last_time = current_time
+
+        return output
+
+    def reset(self):
+        """Reset PID state"""
+        self.integral = np.zeros(3)
+        self.last_error = None
+        self.last_time = None
+
+
 class URForceController(URController):
     """URController with force control capabilities"""
 
@@ -71,8 +127,8 @@ class URForceController(URController):
         self.control_thread = None
         self.control_stop = threading.Event()
 
-        self.force_pid = PIDController(kp=kp_f, ki=ki_f, kd=kd_f)
-        self.pose_pid = PIDController(kp=kp_p, ki=ki_p, kd=kd_p)
+        self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f)
+        self.pose_pid = VectorPIDController(kp=kp_p, ki=ki_p, kd=kd_p)
 
         self.control_rate_hz = hz
         self.min_force_threshold = 0.5
@@ -173,7 +229,7 @@ class URForceController(URController):
         direction = direction / np.linalg.norm(direction)
 
         current_state = self.get_state()
-        self.start_position = np.array(current_state["pose"][:3])
+        self.start_position = np.array(current_state["pose_world"][:3])
 
         if target_position is None:
             self.target_position = self.start_position.copy()
@@ -198,16 +254,8 @@ class URForceController(URController):
 
         self.control_active = True
         self.control_stop.clear()
-        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
         self.control_thread.start()
-
-        print(f"Dual control started:")
-        print(f"  Target position: {self.target_position}")
-        print(f"  Reference force: {self.ref_force}N")
-        print(f"  Direction: {direction}")
-        print(f"  Distance cap: {distance_cap}m, Timeout: {timeout}s")
-
-        return True
 
     def control_to_target(self, reference_force=None, distance_cap=0.2, timeout=30.0):
         if self.control_active:
@@ -219,8 +267,6 @@ class URForceController(URController):
         direction = -np.array(normal, dtype=float)  # into the surface
 
         direction = direction / np.linalg.norm(direction)
-
-        print(f"Robot {self.robot_id} - FINAL DIRECTION: {direction}")
 
         current_state = self.get_state()
         self.start_position = np.array(current_state["pose_world"][:3])
@@ -248,16 +294,120 @@ class URForceController(URController):
 
         self.control_active = True
         self.control_stop.clear()
-        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
         self.control_thread.start()
 
-        print(f"Dual control started:")
-        print(f"  Target position: {self.target_position}")
-        print(f"  Reference force: {self.ref_force}N")
-        print(f"  Direction: {direction}")
-        print(f"  Distance cap: {distance_cap}m, Timeout: {timeout}s")
+    def _control_loop3D(self):
+        """Main 3D vector PID control loop"""
+        control_period = 1.0 / self.control_rate_hz
 
-        return True
+        while self.control_active and not self.control_stop.is_set():
+            loop_start = time.time()
+
+            try:
+                current_state = self.get_state()
+
+                current_force_vector = np.array(
+                    current_state["filtered_force_world"][:3]
+                )
+                current_position = np.array(current_state["gripper_world"][:3])
+
+                # === 3D FORCE CONTROL ===
+                if np.isscalar(self.ref_force):
+                    ref_force_vector = self.ref_force * (
+                        -self.control_direction
+                    )  # TODO check the sign
+                else:
+                    ref_force_vector = np.array(self.ref_force)
+
+                force_error_vector = ref_force_vector - current_force_vector
+                force_output_vector = self.force_pid.update(force_error_vector)
+
+                # === 3D POSITION CONTROL ===
+                position_error_vector = self.target_position - current_position
+                position_output_vector = self.pose_pid.update(position_error_vector)
+
+                # === COMBINE 3D OUTPUTS ===
+                total_output_vector = -force_output_vector + position_output_vector
+
+                speed_command = [
+                    total_output_vector[0],
+                    total_output_vector[1],
+                    total_output_vector[2],
+                    0,
+                    0,
+                    0,
+                ]
+
+                # Data logging
+                data_point = {
+                    "timestamp": time.time() - self.start_time,
+                    "force_vector": current_force_vector.copy(),
+                    "position": current_position.copy(),
+                    "target_position": self.target_position.copy(),
+                    "reference_force_vector": ref_force_vector.copy(),
+                    "force_error_vector": force_error_vector.copy(),
+                    "position_error_vector": position_error_vector.copy(),
+                    "force_output_vector": force_output_vector.copy(),
+                    "position_output_vector": position_output_vector.copy(),
+                    "total_output_vector": total_output_vector.copy(),
+                }
+                self.control_data.append(data_point)
+
+                # Safety checks
+                distance_moved = np.linalg.norm(current_position - self.start_position)
+                if distance_moved >= self.distance_cap:
+                    print(f"Distance cap reached: {distance_moved:.3f}m")
+                    break
+
+                if time.time() - self.start_time >= self.control_timeout:
+                    print(f"Control timeout reached")
+                    break
+
+                self.speedL_world(speed_command, acceleration=0.1, time_duration=0.1)
+
+                # # Debug output (every 1 second)
+                # if int(time.time() * 1) % 1 == 0 and int(time.time() * 10) % 10 == 0:
+                #     print("-------")
+                #     print(f"Reference force (scalar): {self.ref_force}")
+                #     print(f"Control direction (negated): {-self.control_direction}")
+                #     print(f"Reference force vector: {ref_force_vector}")
+                #     print(f"Current force vector: {current_force_vector}")
+                #     print(f"Force error vector: {force_error_vector}")
+                #     print(f"Force PID output vector: {force_output_vector}")
+
+                #     print(f"Current position: {current_position}")
+                #     print(f"Target position: {self.target_position}")
+                #     print(f"Position error vector: {position_error_vector}")
+                #     print(f"Position PID output vector: {position_output_vector}")
+
+                #     print(
+                #         f"Total output vector (force + position): {total_output_vector}"
+                #     )
+                #     print(f"Speed command [vx, vy, vz, wx, wy, wz]: {speed_command}")
+                #     print("-------")
+
+            except Exception as e:
+                print(f"Control error: {e}")
+                try:
+                    self.speedStop()
+                except:
+                    pass
+                break
+
+            # Maintain control rate
+            elapsed = time.time() - loop_start
+            sleep_time = max(0, control_period - elapsed)
+            time.sleep(sleep_time)
+
+        # Clean stop
+        try:
+            self.speedStop()
+        except:
+            pass
+
+        self.control_active = False
+        print("3D vector control loop ended")
 
     def _control_loop(self):
         """Main dual PID control loop"""
@@ -269,28 +419,21 @@ class URForceController(URController):
             try:
                 current_state = self.get_state()
 
-                if (
-                    not current_state
-                    or current_state["force"] is None
-                    or current_state["pose"] is None
-                ):
-                    print("ERROR: Invalid robot state, stopping control")
-                    break
-
                 current_force_vector = np.array(current_state["filtered_force"][:3])
                 current_position = np.array(current_state["pose_world"][:3])
                 # Log data
 
                 # === FORCE CONTROL ===
-                # force_in_direction = np.dot(
-                #     current_force_vector, self.control_direction
-                # )
-                # force_error = self.ref_force + force_in_direction
-                # force_output = self.force_pid.update(force_error)
-
-                force_magnitude = np.linalg.norm(current_force_vector)
-                force_error = self.ref_force - force_magnitude
+                ref_force_in_direction = self.ref_force * -self.control_direction
+                force_error = ref_force_in_direction - current_force_vector
                 force_output = self.force_pid.update(force_error)
+
+                print("-------")
+                print(f"Reference force vector: {self.ref_force}")
+                print(f"Control direction (negated): {self.control_direction}")
+                print(f"Reference force in control direction: {ref_force_in_direction}")
+                print(f"Current force vector: {current_force_vector}")
+                print(f"Force error: {force_error}")
 
                 # === POSITION CONTROL ===
                 position_in_direction = np.dot(
@@ -299,36 +442,28 @@ class URForceController(URController):
                 position_error = -position_in_direction
                 position_output = self.pose_pid.update(position_error)
 
+                print(f"Current position: {current_position}")
+                print(f"Target position: {self.target_position}")
+                print(
+                    f"Position difference (current - target): {current_position - self.target_position}"
+                )
+                print(f"Control direction: {self.control_direction}")
+                print(
+                    f"Position displacement in control direction: {position_in_direction}"
+                )
+                print(f"Position error: {position_error}")
+
                 total_output = force_output + position_output
 
                 velocity = self.control_direction * total_output
                 speed_command = [velocity[0], velocity[1], velocity[2], 0, 0, 0]
 
-                if self.robot_id == 1:
-                    print(f"=== FULL POSITION DEBUG ===")
-                    print(f"Current position world: {current_position}")
-                    print(f"Target position: {self.target_position}")
-                    print(f"Raw difference: {current_position - self.target_position}")
-                    print(f"Control direction: {self.control_direction}")
-                    print(
-                        f"Dot product (position_in_direction): {position_in_direction}"
-                    )
-                    print(f"Position error (-dot_product): {position_error}")
-                    print(f"Force output: {force_output}")
-                    print(f"Position output (PID): {position_output}")
-                    print(f"Total output (force + pos): {total_output}")
-                    print(f"Velocity (direction * total): {velocity}")
-                    print(f"Speed command: {speed_command}")
-                    print(
-                        f"Expected movement direction: {self.target_position - current_position}"
-                    )
-                    print(
-                        f"PID gains: kp={self.pose_pid.kp}, ki={self.pose_pid.ki}, kd={self.pose_pid.kd}"
-                    )
-                    print(
-                        f"Force vs Position contribution: F={force_output:.4f}, P={position_output:.4f}"
-                    )
-                    print("===================")
+                print(f"Position PID output: {position_output}")
+                print(f"Force PID output: {force_output}")
+                print(f"Total output (force + position): {total_output}")
+                print(f"Velocity vector: {velocity}")
+                print(f"Speed command [vx, vy, vz, wx, wy, wz]: {speed_command}")
+                print("-------")
 
                 data_point = {
                     "timestamp": time.time() - self.start_time,
@@ -357,7 +492,6 @@ class URForceController(URController):
                 # Debug output (every 1 second)
                 if int(time.time() * 1) % 1 == 0 and int(time.time() * 10) % 10 == 0:
                     print(
-                        f"Force: {force_magnitude:.2f}N (target: {self.ref_force}N), "
                         f"Pos error: {position_error:.3f}m, "
                         f"Combined output: {total_output:.3f}, "
                         f"Distance: {distance_moved:.3f}m"
@@ -385,6 +519,11 @@ class URForceController(URController):
         self.control_active = False
         print("Dual control loop ended")
 
+    def wait_for_control(self):
+        """Wait for force control to complete"""
+        if self.control_thread and self.control_thread.is_alive():
+            self.control_thread.join()
+
     def stop_control(self):
         """Stop the force control loop"""
         if self.control_active:
@@ -394,19 +533,10 @@ class URForceController(URController):
                 self.control_thread.join(timeout=2.0)
             print("Control stopped")
 
-    def wait_for_control(self):
-        """Wait for force control to complete"""
-        if self.control_thread and self.control_thread.is_alive():
-            self.control_thread.join()
-
-    def get_current_force(self):
-        """Get current TCP force reading"""
-        return self.get_state()["force"]
-
-    def get_force_magnitude(self):
-        """Get magnitude of current force vector"""
-        force_vector = np.array(self.get_state()["force"][:3])
-        return np.linalg.norm(force_vector)
+    def disconnect(self):
+        """Override disconnect to stop force control first"""
+        self.stop_control()
+        super().disconnect()
 
     def plot_data(self):
         """Generate comprehensive plots for control data including pose reference tracking"""
@@ -706,24 +836,542 @@ class URForceController(URController):
         else:
             print("No data available for summary statistics")
 
-    def disconnect(self):
-        """Override disconnect to stop force control first"""
-        self.stop_control()
-        super().disconnect()
+    def plot_data3D(self):
+        """Generate comprehensive plots for control data including pose reference tracking"""
+        if not self.control_data:
+            print("No data to plot")
+            return
+
+        # Extract data from logged data
+        timestamps = [d["timestamp"] for d in self.control_data]
+        force_vectors = np.array([d["force_vector"] for d in self.control_data])
+        positions = np.array([d["position"] for d in self.control_data])
+        target_positions = np.array([d["target_position"] for d in self.control_data])
+
+        # Updated vector data extraction
+        reference_force_vectors = np.array(
+            [d["reference_force_vector"] for d in self.control_data]
+        )
+        force_error_vectors = np.array(
+            [d["force_error_vector"] for d in self.control_data]
+        )
+        position_error_vectors = np.array(
+            [d["position_error_vector"] for d in self.control_data]
+        )
+        force_output_vectors = np.array(
+            [d["force_output_vector"] for d in self.control_data]
+        )
+        position_output_vectors = np.array(
+            [d["position_output_vector"] for d in self.control_data]
+        )
+        total_output_vectors = np.array(
+            [d["total_output_vector"] for d in self.control_data]
+        )
+
+        # Handle both 3D and 6D target positions (extract only position part)
+        if target_positions.shape[1] == 6:
+            target_positions = target_positions[
+                :, :3
+            ]  # Extract only xyz, ignore rotation
+        elif target_positions.shape[1] != 3:
+            print(
+                f"Warning: Unexpected target_position shape {target_positions.shape}, using first 3 elements"
+            )
+            target_positions = target_positions[:, :3]
+
+        # Calculate derived metrics
+        force_magnitudes = np.linalg.norm(force_vectors, axis=1)
+        reference_force_magnitudes = np.linalg.norm(reference_force_vectors, axis=1)
+        force_in_direction = [
+            np.dot(fv, self.control_direction) for fv in force_vectors
+        ]
+        ref_force_in_direction = [
+            np.dot(rfv, self.control_direction) for rfv in reference_force_vectors
+        ]
+
+        distances_from_start = np.linalg.norm(positions - self.start_position, axis=1)
+
+        # Position errors in control direction
+        position_errors_in_direction = [
+            np.dot(pos_err, self.control_direction)
+            for pos_err in position_error_vectors
+        ]
+
+        # Force errors in control direction
+        force_errors_in_direction = [
+            np.dot(force_err, self.control_direction)
+            for force_err in force_error_vectors
+        ]
+
+        # Error magnitudes
+        force_error_magnitudes = np.linalg.norm(force_error_vectors, axis=1)
+        position_error_magnitudes = np.linalg.norm(position_error_vectors, axis=1)
+
+        # Output magnitudes
+        force_output_magnitudes = np.linalg.norm(force_output_vectors, axis=1)
+        position_output_magnitudes = np.linalg.norm(position_output_vectors, axis=1)
+        total_output_magnitudes = np.linalg.norm(total_output_vectors, axis=1)
+
+        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        initial_target_pose_str = f"[{self.target_position[0]:.3f}, {self.target_position[1]:.3f}, {self.target_position[2]:.3f}]"
+
+        # PID parameters (handle both scalar and vector PIDs)
+        if hasattr(self.force_pid, "kp") and np.isscalar(self.force_pid.kp):
+            force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
+        else:
+            force_pid_str = f"Kp={self.force_pid.kp}, Ki={self.force_pid.ki}, Kd={self.force_pid.kd}"
+
+        if hasattr(self.pose_pid, "kp") and np.isscalar(self.pose_pid.kp):
+            pose_pid_str = f"Kp={self.pose_pid.kp:.3f}, Ki={self.pose_pid.ki:.3f}, Kd={self.pose_pid.kd:.3f}"
+        else:
+            pose_pid_str = (
+                f"Kp={self.pose_pid.kp}, Ki={self.pose_pid.ki}, Kd={self.pose_pid.kd}"
+            )
+
+        plt.figure(figsize=(18, 12))
+
+        # Main title for the entire figure
+        ref_force_str = (
+            f"{reference_force_magnitudes[0]:.2f}N"
+            if len(reference_force_magnitudes) > 0
+            else "N/A"
+        )
+        plt.suptitle(
+            f"3D Vector Control Data Plot ({current_datetime})\n"
+            f"Ref Force: {ref_force_str}, Target Pose: {initial_target_pose_str}\n"
+            f"Force PID: ({force_pid_str}), Pose PID: ({pose_pid_str})",
+            fontsize=16,
+            y=0.98,
+        )
+
+        # === ROW 1: Reference Tracking and Movement ===
+
+        # 1. Force vs Target Force (3D Components)
+        plt.subplot(3, 3, 1)
+        plt.plot(
+            timestamps, force_vectors[:, 0], label="X Force", linewidth=2, color="red"
+        )
+        plt.plot(
+            timestamps, force_vectors[:, 1], label="Y Force", linewidth=2, color="green"
+        )
+        plt.plot(
+            timestamps, force_vectors[:, 2], label="Z Force", linewidth=2, color="blue"
+        )
+        plt.plot(
+            timestamps,
+            reference_force_vectors[:, 0],
+            label="X Target",
+            linewidth=2,
+            linestyle="--",
+            color="red",
+            alpha=0.7,
+        )
+        plt.plot(
+            timestamps,
+            reference_force_vectors[:, 1],
+            label="Y Target",
+            linewidth=2,
+            linestyle="--",
+            color="green",
+            alpha=0.7,
+        )
+        plt.plot(
+            timestamps,
+            reference_force_vectors[:, 2],
+            label="Z Target",
+            linewidth=2,
+            linestyle="--",
+            color="blue",
+            alpha=0.7,
+        )
+        plt.title("Force vs Target Force")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Force (N)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 2. Position vs Target Position
+        plt.subplot(3, 3, 2)
+        plt.plot(
+            timestamps, positions[:, 0], label="X Position", linewidth=2, color="red"
+        )
+        plt.plot(
+            timestamps, positions[:, 1], label="Y Position", linewidth=2, color="green"
+        )
+        plt.plot(
+            timestamps, positions[:, 2], label="Z Position", linewidth=2, color="blue"
+        )
+        plt.plot(
+            timestamps,
+            target_positions[:, 0],
+            label="X Target",
+            linewidth=2,
+            linestyle="--",
+            color="red",
+            alpha=0.7,
+        )
+        plt.plot(
+            timestamps,
+            target_positions[:, 1],
+            label="Y Target",
+            linewidth=2,
+            linestyle="--",
+            color="green",
+            alpha=0.7,
+        )
+        plt.plot(
+            timestamps,
+            target_positions[:, 2],
+            label="Z Target",
+            linewidth=2,
+            linestyle="--",
+            color="blue",
+            alpha=0.7,
+        )
+        plt.title("Position vs Target Position")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Position (m)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 3. Movement Distance vs Time
+        plt.subplot(3, 3, 3)
+        plt.plot(
+            timestamps,
+            distances_from_start,
+            label="Distance from Start",
+            linewidth=2,
+            color="brown",
+        )
+        if hasattr(self, "distance_cap"):
+            plt.axhline(
+                y=self.distance_cap,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label=f"Distance Cap ({self.distance_cap}m)",
+            )
+        plt.title("Movement Distance vs Time")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Distance (m)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # === ROW 2: Error Analysis ===
+
+        # 4. Force Error Vectors (3D)
+        plt.subplot(3, 3, 4)
+        plt.plot(
+            timestamps,
+            force_error_vectors[:, 0],
+            label="Force Error X",
+            linewidth=2,
+            color="red",
+        )
+        plt.plot(
+            timestamps,
+            force_error_vectors[:, 1],
+            label="Force Error Y",
+            linewidth=2,
+            color="green",
+        )
+        plt.plot(
+            timestamps,
+            force_error_vectors[:, 2],
+            label="Force Error Z",
+            linewidth=2,
+            color="blue",
+        )
+        plt.plot(
+            timestamps,
+            force_error_magnitudes,
+            label="Force Error Magnitude",
+            linewidth=2,
+            color="black",
+            linestyle="--",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("3D Force Error Vectors")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Force Error (N)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 5. Position Error Vectors (3D)
+        plt.subplot(3, 3, 5)
+        plt.plot(
+            timestamps,
+            position_error_vectors[:, 0],
+            label="Position Error X",
+            linewidth=2,
+            color="red",
+        )
+        plt.plot(
+            timestamps,
+            position_error_vectors[:, 1],
+            label="Position Error Y",
+            linewidth=2,
+            color="green",
+        )
+        plt.plot(
+            timestamps,
+            position_error_vectors[:, 2],
+            label="Position Error Z",
+            linewidth=2,
+            color="blue",
+        )
+        plt.plot(
+            timestamps,
+            position_error_magnitudes,
+            label="Position Error Magnitude",
+            linewidth=2,
+            color="black",
+            linestyle="--",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("3D Position Error Vectors")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Position Error (m)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 6. Directional Errors (along control direction)
+        plt.subplot(3, 3, 6)
+        plt.plot(
+            timestamps,
+            force_errors_in_direction,
+            label="Force Error in Direction",
+            linewidth=2,
+            color="darkred",
+        )
+        plt.plot(
+            timestamps,
+            position_errors_in_direction,
+            label="Position Error in Direction",
+            linewidth=2,
+            color="darkgreen",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("Errors in Control Direction")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Error")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # === ROW 3: Control Outputs ===
+
+        # 7. Force Output Vectors (3D)
+        plt.subplot(3, 3, 7)
+        plt.plot(
+            timestamps,
+            force_output_vectors[:, 0],
+            label="Force Output X",
+            linewidth=2,
+            color="red",
+        )
+        plt.plot(
+            timestamps,
+            force_output_vectors[:, 1],
+            label="Force Output Y",
+            linewidth=2,
+            color="green",
+        )
+        plt.plot(
+            timestamps,
+            force_output_vectors[:, 2],
+            label="Force Output Z",
+            linewidth=2,
+            color="blue",
+        )
+        plt.plot(
+            timestamps,
+            force_output_magnitudes,
+            label="Force Output Magnitude",
+            linewidth=2,
+            color="black",
+            linestyle="--",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("3D Force Control Outputs")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Force Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 8. Position Output Vectors (3D)
+        plt.subplot(3, 3, 8)
+        plt.plot(
+            timestamps,
+            position_output_vectors[:, 0],
+            label="Position Output X",
+            linewidth=2,
+            color="red",
+        )
+        plt.plot(
+            timestamps,
+            position_output_vectors[:, 1],
+            label="Position Output Y",
+            linewidth=2,
+            color="green",
+        )
+        plt.plot(
+            timestamps,
+            position_output_vectors[:, 2],
+            label="Position Output Z",
+            linewidth=2,
+            color="blue",
+        )
+        plt.plot(
+            timestamps,
+            position_output_magnitudes,
+            label="Position Output Magnitude",
+            linewidth=2,
+            color="black",
+            linestyle="--",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("3D Position Control Outputs")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Position Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 9. Total Output Vectors (3D)
+        plt.subplot(3, 3, 9)
+        plt.plot(
+            timestamps,
+            total_output_vectors[:, 0],
+            label="Total Output X",
+            linewidth=2,
+            color="red",
+        )
+        plt.plot(
+            timestamps,
+            total_output_vectors[:, 1],
+            label="Total Output Y",
+            linewidth=2,
+            color="green",
+        )
+        plt.plot(
+            timestamps,
+            total_output_vectors[:, 2],
+            label="Total Output Z",
+            linewidth=2,
+            color="blue",
+        )
+        plt.plot(
+            timestamps,
+            total_output_magnitudes,
+            label="Total Output Magnitude",
+            linewidth=2,
+            color="purple",
+            linestyle="--",
+        )
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        plt.title("3D Total Control Outputs")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Total Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        # Save filename with date
+        filename = f"plots/comprehensive_3d_control_plot_{current_datetime}_{self.robot_id}.png"
+        os.makedirs("plots", exist_ok=True)
+        plt.savefig(filename, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        # Print comprehensive summary statistics
+        if timestamps:
+            final_force_mag = force_magnitudes[-1] if len(force_magnitudes) > 0 else 0
+            final_ref_force_mag = (
+                reference_force_magnitudes[-1]
+                if len(reference_force_magnitudes) > 0
+                else 0
+            )
+            final_force_in_dir = force_in_direction[-1] if force_in_direction else 0
+            final_ref_force_in_dir = (
+                ref_force_in_direction[-1] if ref_force_in_direction else 0
+            )
+
+            max_distance = (
+                max(distances_from_start) if len(distances_from_start) > 0 else 0
+            )
+            control_duration = timestamps[-1]
+
+            final_position_error_mag = (
+                position_error_magnitudes[-1]
+                if len(position_error_magnitudes) > 0
+                else 0
+            )
+            final_position_error_dir = (
+                position_errors_in_direction[-1] if position_errors_in_direction else 0
+            )
+
+            avg_force_error_mag = np.mean(force_error_magnitudes)
+            avg_position_error_mag = np.mean(position_error_magnitudes)
+            avg_force_error_dir = np.mean(np.abs(force_errors_in_direction))
+            avg_position_error_dir = np.mean(np.abs(position_errors_in_direction))
+
+            print("=" * 70)
+            print("COMPREHENSIVE 3D VECTOR CONTROL SUMMARY")
+            print("=" * 70)
+            print(f"Plot saved as: {filename} ({len(self.control_data)} samples)")
+            print(f"Control duration: {control_duration:.2f}s")
+            print("")
+            print("FORCE TRACKING:")
+            print(f"  Final force magnitude: {final_force_mag:.3f}N")
+            print(f"  Reference force magnitude: {final_ref_force_mag:.3f}N")
+            print(f"  Final force in direction: {final_force_in_dir:.3f}N")
+            print(f"  Reference force in direction: {final_ref_force_in_dir:.3f}N")
+            print(
+                f"  Force error magnitude: {abs(final_ref_force_mag - final_force_mag):.3f}N"
+            )
+            print(f"  Average force error magnitude: {avg_force_error_mag:.3f}N")
+            print(f"  Average force error in direction: {avg_force_error_dir:.3f}N")
+            print("")
+            print("POSITION TRACKING:")
+            print(f"  Max distance moved: {max_distance:.3f}m")
+            if hasattr(self, "distance_cap"):
+                print(f"  Distance cap: {self.distance_cap}m")
+            print(f"  Final position error magnitude: {final_position_error_mag:.3f}m")
+            print(
+                f"  Final position error in direction: {final_position_error_dir:.3f}m"
+            )
+            print(f"  Average position error magnitude: {avg_position_error_mag:.3f}m")
+            print(
+                f"  Average position error in direction: {avg_position_error_dir:.3f}m"
+            )
+            print("")
+            print("CONTROL PARAMETERS:")
+            print(
+                f"  Control direction: [{self.control_direction[0]:.2f}, {self.control_direction[1]:.2f}, {self.control_direction[2]:.2f}]"
+            )
+            print(f"  Force PID: {force_pid_str}")
+            print(f"  Pose PID: {pose_pid_str}")
+            print("")
+            print("FINAL OUTPUT MAGNITUDES:")
+            print(f"  Force output: {force_output_magnitudes[-1]:.6f}")
+            print(f"  Position output: {position_output_magnitudes[-1]:.6f}")
+            print(f"  Total output: {total_output_magnitudes[-1]:.6f}")
+            print("=" * 70)
+        else:
+            print("No data available for summary statistics")
 
 
 if __name__ == "__main__":
     hz = 50
 
-    kp_f = 0.00
-    ki_f = 0.00
-    kd_f = 0.0
+    kp_f = 0.0016
+    ki_f = 0.0000
+    kd_f = 0.00075
 
-    kp_p = 0.4
+    kp_p = 0.3
     ki_p = 0.0
-    kd_p = 0.0
+    kd_p = 0.001
 
-    alpha = 0
+    alpha = 0.2
 
     robotL = URForceController(
         "192.168.1.33",
@@ -750,6 +1398,15 @@ if __name__ == "__main__":
     robotR.alpha = alpha
 
     try:
+        robotR.go_home()
+        robotL.go_home()
+
+        robotR.wait_for_commands()
+        robotL.wait_for_commands()
+
+        robotR.wait_until_done()
+        robotL.wait_until_done()
+
         robotR.go_to_approach()
         robotL.go_to_approach()
 
@@ -763,20 +1420,20 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=10.0,
             distance_cap=0.30,
-            timeout=5.0,
+            timeout=15.0,
         )
 
-        # robotL.control_to_target(
-        #     reference_force=10.0,
-        #     distance_cap=0.30,
-        #     timeout=5.0,
-        # )
+        robotL.control_to_target(
+            reference_force=10.0,
+            distance_cap=0.30,
+            timeout=15.0,
+        )
 
         robotR.wait_for_control()
         robotL.wait_for_control()
 
-        robotR.plot_data()
-        robotL.plot_data()
+        robotR.plot_data3D()
+        robotL.plot_data3D()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
