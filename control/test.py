@@ -13,7 +13,7 @@ if __name__ == "__main__":
     kd_p = 0.002
 
     robot = URForceController(
-        "192.168.1.66",
+        "192.168.1.33",
         hz=hz,
         kp_f=kp_f,
         ki_f=ki_f,
@@ -22,22 +22,5 @@ if __name__ == "__main__":
         ki_p=ki_p,
         kd_p=kd_p,
     )
-    pose = np.array(robot.get_state()["pose"])  # Get the current pose (x, y, z)
-    pose_world = np.array(robot.get_state()["pose_world"])
-    pose_to_move_world = [
-        0.03551311,
-        0.21242163,
-        0.16031769,
-        -3.10394422,
-        -0.07104528,
-        0.00955018,
-    ]
-    print(pose_to_move_world)
-
-    robot.moveL_gripper_world(pose_to_move_world)
-    robot.wait_for_commands()
-    robot.wait_until_done()
-
-    pose = np.array(robot.get_state()["pose"])  # Get the current pose (x, y, z)
-    pose_world = np.array(robot.get_state()["pose_world"])
-    print(pose_world)
+    pose = np.array(robot.get_state()["joints"])
+    print(pose)

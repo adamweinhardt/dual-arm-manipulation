@@ -62,7 +62,7 @@ class PIDController:
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
 
-    def __init__(self, kp, ki, kd):
+    def __init__(self, kp, ki, kd, dt=0.02):
         """
         Args:
             kp, ki, kd: Can be scalars (same gains for all axes) or 3-element arrays
@@ -71,34 +71,24 @@ class VectorPIDController:
         self.ki = np.array(ki) if not np.isscalar(ki) else np.array([ki, ki, ki])
         self.kd = np.array(kd) if not np.isscalar(kd) else np.array([kd, kd, kd])
 
+        self.dt = dt
         self.integral = np.zeros(3)
         self.last_error = None
         self.last_time = None
 
     def update(self, error_vector):
-        """
-        Args:
-            error_vector: 3D numpy array [ex, ey, ez]
-        Returns:
-            output_vector: 3D numpy array [ux, uy, uz]
-        """
         error_vector = np.array(error_vector)
         current_time = time.time()
 
         if self.last_time is None:
-            dt = 0.01
             derivative = np.zeros(3)
         else:
-            dt = current_time - self.last_time
-            if dt <= 0:
-                dt = 0.01
-
             if self.last_error is not None:
-                derivative = (error_vector - self.last_error) / dt
+                derivative = (error_vector - self.last_error) / self.dt
             else:
                 derivative = np.zeros(3)
 
-        self.integral += error_vector * dt
+        self.integral += error_vector * self.dt
         self.integral = np.clip(self.integral, -1.0, 1.0)
 
         output = self.kp * error_vector + self.ki * self.integral + self.kd * derivative
@@ -127,10 +117,10 @@ class URForceController(URController):
         self.control_thread = None
         self.control_stop = threading.Event()
 
-        self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f)
-        self.pose_pid = VectorPIDController(kp=kp_p, ki=ki_p, kd=kd_p)
-
         self.control_rate_hz = hz
+        self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f, dt=1 / hz)
+        self.pose_pid = VectorPIDController(kp=kp_p, ki=ki_p, kd=kd_p, dt=1 / hz)
+
         self.min_force_threshold = 0.5
 
         self.control_data = []
@@ -1362,14 +1352,15 @@ class URForceController(URController):
 
 if __name__ == "__main__":
     hz = 50
+    reference_force = 12.5
 
-    kp_f = 0.0016
-    ki_f = 0.0000
-    kd_f = 0.00075
+    kp_f = 0.0024
+    ki_f = 0.0001
+    kd_f = 0.00055
 
     kp_p = 0.3
-    ki_p = 0.0
-    kd_p = 0.001
+    ki_p = 0.00005
+    kd_p = 0.0002
 
     alpha = 0.2
 
@@ -1398,6 +1389,12 @@ if __name__ == "__main__":
     robotR.alpha = alpha
 
     try:
+        robotL.moveJ(
+            [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
+        )
+
+        robotL.wait_for_commands()
+
         robotR.go_home()
         robotL.go_home()
 
@@ -1418,13 +1415,13 @@ if __name__ == "__main__":
         time.sleep(0.1)
 
         robotR.control_to_target(
-            reference_force=10.0,
+            reference_force=reference_force,
             distance_cap=0.30,
             timeout=15.0,
         )
 
         robotL.control_to_target(
-            reference_force=10.0,
+            reference_force=reference_force,
             distance_cap=0.30,
             timeout=15.0,
         )

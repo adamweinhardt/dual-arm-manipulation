@@ -50,6 +50,7 @@ class URController(threading.Thread):
         self._stop_event = threading.Event()
 
         # State publisher
+        self.hz = None
         self.publishing = False
         self.context = zmq.Context()
         self.publisher = self.context.socket(zmq.PUB)
@@ -122,8 +123,7 @@ class URController(threading.Thread):
     def _publish_loop(self):
         """Main publishing loop - runs in background thread"""
 
-        rate_hz = 20  # 20Hz update rate
-        interval = 1.0 / rate_hz
+        interval = 1.0 / self.hz
 
         def to_list(data):
             """Convert numpy arrays to lists for JSON serialization"""
@@ -225,14 +225,12 @@ class URController(threading.Thread):
         self.command_queue.put(command)
 
     def moveL_world(self, pose_world):
-        print(f"moveL_world pose: {pose_world}")
         if isinstance(pose_world, np.ndarray):
             pose_world = pose_world.tolist()
 
         try:
             pose_ee = self.world_2_robot(pose_world, self.robot_config)
 
-            print(f"MoveL pose: {pose_ee}")
             self.moveL(pose_ee)
 
         except Exception as e:
@@ -243,9 +241,6 @@ class URController(threading.Thread):
 
         try:
             gripper_pose = TCP_world + self.ee2marker_offset
-            print(f"TCP_world input: {TCP_world}")
-            print(f"ee2marker_offset: {self.ee2marker_offset}")
-            print(f"gripper_pose calculated: {gripper_pose}")
 
             self.moveL_world(gripper_pose)
 
