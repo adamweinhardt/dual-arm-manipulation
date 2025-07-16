@@ -2,17 +2,17 @@ from control.ur_force_controller import URForceController
 import numpy as np
 
 if __name__ == "__main__":
-    hz = 50
+    hz = 100
 
     kp_f = 0.005
     ki_f = 0.0
     kd_f = 0.0
 
-    kp_p = 0.3
+    kp_p = 0.0
     ki_p = 0.0
     kd_p = 0.0
 
-    alpha = 0.0
+    alpha = 0.99
 
     robot = URForceController(
         "192.168.1.66",
@@ -31,8 +31,6 @@ if __name__ == "__main__":
         robot.get_state()["pose_world"][:3]
     )  # Get the current pose (x, y, z)
     ref_pose = pose + offset
-    print(pose)
-    print(ref_pose)
 
     try:
         robot.control_to_target_manual(
@@ -40,12 +38,12 @@ if __name__ == "__main__":
             reference_force=10.0,
             direction=[0, 0, -1],
             distance_cap=0.3,
-            timeout=15.0,
+            timeout=10.0,
         )
         robot.wait_for_control()
 
         robot.plot_data3D()
-
+        robot.plot_forces()
     except KeyboardInterrupt:
         print("\nInterrupted by user")
         robot.stop_control()

@@ -115,7 +115,6 @@ class URForceController(URController):
 
         self.control_active = False
         self.lifting = False
-        self.lifting_offset = [0, 0, 0.2]
         self.control_thread = None
         self.control_stop = threading.Event()
 
@@ -318,26 +317,24 @@ class URForceController(URController):
                     print(f"Control timeout reached")
                     break
 
-                if self.lifting and not self.lifting_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 45:
-                        print("Lifting phase has started.")
-                        self.target_position = (
-                            self.target_position + self.lifting_offset
-                        )
-                        self.ref_force += 20
-                        self.lifting_applied = True
+                # if self.lifting and not self.lifting_applied:
+                #     if time.time() - self.start_time >= self.control_timeout - 15:
+                #         print("Lifting phase has started.")
+                #         self.target_position = self.target_position + [0, 0, 0.15]
+                #         self.ref_force += 20
+                #         self.lifting_applied = True
 
-                if self.lifting and not self.side_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 30:
-                        print("Side phase has started.")
-                        self.target_position = self.target_position + [-0.2, 0, 0]
-                        self.side_applied = True
+                # if self.lifting and not self.side_applied:
+                #     if time.time() - self.start_time >= self.control_timeout - 20:
+                #         print("Side phase has started.")
+                #         self.target_position = self.target_position + [-0.15, 0, 0]
+                #         self.side_applied = True
 
-                if self.lifting and not self.down_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 15:
-                        print("Lifting phase has started.")
-                        self.target_position = self.target_position + [0, 0, -0.2]
-                        self.down_applied = True
+                # if self.lifting and not self.down_applied:
+                #     if time.time() - self.start_time >= self.control_timeout - 10:
+                #         print("Descending phase has started.")
+                #         self.target_position = self.target_position + [0, 0, -0.15]
+                #         self.down_applied = True
 
                 # === 3D FORCE CONTROL ===
                 if np.isscalar(self.ref_force):
@@ -1354,18 +1351,18 @@ class URForceController(URController):
 
 
 if __name__ == "__main__":
-    hz = 50
+    hz = 100
     reference_force = 12.5
 
-    kp_f = 0.0024
-    ki_f = 0.0001
-    kd_f = 0.00055
+    kp_f = 0.0015
+    ki_f = 0.00005
+    kd_f = 0.0002
 
-    kp_p = 0.3
+    kp_p = 0.5
     ki_p = 0.00005
     kd_p = 0.0002
 
-    alpha = 0.2
+    alpha = 0.99
 
     robotL = URForceController(
         "192.168.1.33",
@@ -1422,13 +1419,13 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60.0,
+            timeout=20.0,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60.0,
+            timeout=20.0,
         )
 
         robotR.wait_for_control()

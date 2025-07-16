@@ -26,7 +26,7 @@ class URController(threading.Thread):
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
             )
             self.port = 5559
-            self.ee2marker_offset = np.array([0.02, 0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset = np.array([0.00, 0.05753, -0.10, 0, 0, 0])
 
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
@@ -34,7 +34,7 @@ class URController(threading.Thread):
                 "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
             )
             self.port = 5556
-            self.ee2marker_offset = np.array([-0.02, -0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset = np.array([0.00, -0.05753, -0.10, 0, 0, 0])
         else:
             self.robot_id = None
             self.robot_config = None
@@ -77,8 +77,9 @@ class URController(threading.Thread):
         # Data recording
         self.previous_force = None
         self.previous_force_world = None
-        self.alpha = 0
+        self.alpha = 1
         self.data = []
+        self.forces = []
 
         # Start the control thread
         self.start()
@@ -321,14 +322,16 @@ class URController(threading.Thread):
         filtered_force = self.force_low_pass_filter(
             self.previous_force, force_robot_base, self.alpha
         )
-        self.previous_force = force_robot_base
+        self.previous_force = filtered_force
 
         filtered_force_world = self.force_low_pass_filter(
-            self.previous_force_world, force_world, self.alpha
+            self.previous_force_world, force_vector_world, self.alpha
         )
-        self.previous_force_world = force_world
+        self.previous_force_world = filtered_force_world
 
         gripper_world = pose_world - self.ee2marker_offset
+
+        self.forces.append([force_vector_world, filtered_force_world])
 
         return {
             "pose": pose_robot_base,
@@ -342,6 +345,69 @@ class URController(threading.Thread):
             "filtered_force_world": filtered_force_world,
             "gripper_world": gripper_world,
         }
+
+    def plot_forces(self):
+        """
+        Plot both raw and filtered forces over time.
+        Assumes self.forces contains [force_world, filtered_force_world] pairs.
+        """
+        if not self.forces:
+            print("No force data to plot")
+            return
+
+        # Extract force data
+        forces_array = np.array(self.forces)
+        raw_forces = forces_array[:, 0]  # force_world
+        filtered_forces = forces_array[:, 1]  # filtered_force_world
+
+        # Create time array (assuming constant sampling rate)
+        time = np.arange(len(raw_forces))
+
+        # Create subplots for each force component (assuming 3D forces: x, y, z)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+        fig.suptitle(
+            f"Force Comparison: Raw vs Filtered, Alpha: {self.alpha}", fontsize=16
+        )
+
+        labels = ["X", "Y", "Z"]
+        colors_raw = ["red", "green", "blue"]
+        colors_filtered = ["darkred", "darkgreen", "darkblue"]
+
+        for i in range(3):
+            ax = axes[i]
+
+            # Plot raw forces
+            raw_force_component = [f[i] for f in raw_forces]
+            ax.plot(
+                time,
+                raw_force_component,
+                color=colors_raw[i],
+                alpha=0.6,
+                linewidth=1,
+                label=f"Raw Force {labels[i]}",
+            )
+
+            # Plot filtered forces
+            filtered_force_component = [f[i] for f in filtered_forces]
+            ax.plot(
+                time,
+                filtered_force_component,
+                color=colors_filtered[i],
+                linewidth=2,
+                label=f"Filtered Force {labels[i]}",
+            )
+
+            ax.set_ylabel(f"Force {labels[i]} (N)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        axes[-1].set_xlabel("Time Steps")
+        plt.tight_layout()
+
+        # Save the plot instead of showing
+        plt.savefig("force_comparison.png", dpi=300, bbox_inches="tight")
+        plt.close()
+        print("Force comparison plot saved as 'force_comparison.png'")
 
     def is_moving(self):
         speeds = self.rtde_receive.getActualTCPSpeed()

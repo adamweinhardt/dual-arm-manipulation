@@ -344,8 +344,8 @@ class GraspingPointsPublisher:
         self,
         config_path: str,
         port: int = 5560,
-        publish_rate_hz: float = 10.0,
-        approach_offset: float = 0.15,
+        publish_rate_hz: float = 20.0,
+        approach_offset: float = 0.05,
     ):
         self.config_path = config_path
         self.port = port
@@ -444,7 +444,7 @@ if __name__ == "__main__":
         "robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json"
     )
 
-    publisher = GraspingPointsPublisher(config_path, approach_offset=0.15)
+    publisher = GraspingPointsPublisher(config_path, approach_offset=0.05)
 
     try:
         publisher.start_publishing()
