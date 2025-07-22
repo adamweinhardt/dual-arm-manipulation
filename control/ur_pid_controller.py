@@ -6,57 +6,10 @@ import os
 import datetime
 import matplotlib.pyplot as plt
 from ur_controller import URController
-from dual_arm_controller import DualArmController
 from robot_ipc_control.pose_estimation.transform_utils import (
-    rvec_to_rotmat,
     rotmat_to_rvec,
     end_effector_rotation_from_normal,
 )
-
-
-class PIDController:
-    """Basic PID controller for force control"""
-
-    def __init__(self, kp=1.0, ki=0.0, kd=0.0, max_output=0.2, dt=0.02):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.max_output = max_output
-        self.dt = dt
-
-        # states
-        self.prev_error = 0.0
-        self.integral = 0.0
-        self.last_time = time.time()
-
-    def update(self, error):
-        current_time = time.time()
-        dt = current_time - self.last_time
-
-        if dt <= 0.0:
-            dt = self.dt
-
-        p_term = self.kp * error
-
-        self.integral += error * dt
-        i_term = self.ki * self.integral
-
-        derivative = (error - self.prev_error) / dt
-        d_term = self.kd * derivative
-
-        output = p_term + i_term + d_term
-
-        output = np.clip(output, -self.max_output, self.max_output)
-
-        self.prev_error = error
-        self.last_time = current_time
-
-        return output
-
-    def reset(self):
-        self.prev_error = 0.0
-        self.integral = 0.0
-        self.last_time = time.time()
 
 
 class VectorPIDController:
@@ -72,7 +25,9 @@ class VectorPIDController:
         self.kd = np.array(kd) if not np.isscalar(kd) else np.array([kd, kd, kd])
 
         self.dt = dt
+        self.proportional = np.zeros(3)
         self.integral = np.zeros(3)
+        self.derivative = np.zeros(3)
         self.last_error = None
         self.last_time = None
 
@@ -80,23 +35,29 @@ class VectorPIDController:
         error_vector = np.array(error_vector)
         current_time = time.time()
 
+        self.proportional = error_vector
+
         if self.last_time is None:
-            derivative = np.zeros(3)
+            self.derivative = np.zeros(3)
         else:
             if self.last_error is not None:
-                derivative = (error_vector - self.last_error) / self.dt
+                self.derivative = (error_vector - self.last_error) / self.dt
             else:
-                derivative = np.zeros(3)
+                self.derivative = np.zeros(3)
 
         self.integral += error_vector * self.dt
         self.integral = np.clip(self.integral, -1.0, 1.0)
 
-        output = self.kp * error_vector + self.ki * self.integral + self.kd * derivative
+        P_term = self.kp * self.proportional
+        I_term = self.ki * self.integral
+        D_term = self.kd * self.derivative
+
+        output = P_term + I_term + D_term
 
         self.last_error = error_vector.copy()
         self.last_time = current_time
 
-        return output
+        return output, P_term, I_term, D_term
 
     def reset(self):
         """Reset PID state"""
@@ -121,8 +82,6 @@ class URForceController(URController):
         self.control_rate_hz = hz
         self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f, dt=1 / hz)
         self.pose_pid = VectorPIDController(kp=kp_p, ki=ki_p, kd=kd_p, dt=1 / hz)
-
-        self.min_force_threshold = 0.5
 
         self.control_data = []
 
@@ -248,7 +207,9 @@ class URForceController(URController):
         self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
         self.control_thread.start()
 
-    def control_to_target(self, reference_force=None, distance_cap=0.2, timeout=30.0):
+    def control_to_target(
+        self, reference_force=None, distance_cap=0.2, timeout=30.0, pose_updates=None
+    ):
         if self.control_active:
             print("Control already active!")
             return False
@@ -276,6 +237,10 @@ class URForceController(URController):
         self.distance_cap = distance_cap
         self.control_timeout = timeout
         self.start_time = time.time()
+
+        self.pose_updates = pose_updates or []
+        self.applied_updates = set()
+        self.pose_updates.sort(key=lambda x: x["time"])
 
         self.force_pid.reset()
         self.pose_pid.reset()
@@ -317,35 +282,34 @@ class URForceController(URController):
                     print(f"Control timeout reached")
                     break
 
-                if self.lifting and not self.lifting_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 16:
-                        print("Lifting phase has started.")
-                        self.target_position = self.target_position + [0, 0, 0.2]
-                        self.lifting_applied = True
+                # Handle timed pose updates
+                current_time = time.time() - self.start_time
+                for i, update in enumerate(self.pose_updates):
+                    if i in self.applied_updates:
+                        continue
 
-                if self.lifting and not self.side_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 12:
-                        print("Side phase has started.")
-                        self.target_position = self.target_position + [-1.0, 0, 0]
-                        self.side_applied = True
-
-                if self.lifting and not self.down_applied:
-                    if time.time() - self.start_time >= self.control_timeout - 4:
-                        print("Descending phase has started.")
-                        self.target_position = self.target_position + [0, 0, -0.2]
-                        self.down_applied = True
+                    if current_time >= update["time"]:
+                        offset = np.array(update["position"])
+                        self.target_position = self.target_position + offset
+                        self.applied_updates.add(i)
 
                 # === 3D FORCE CONTROL ===
                 if np.isscalar(self.ref_force):
-                    ref_force_vector = self.ref_force * (-self.control_direction)
+                    ref_force_vector = self.ref_force * (
+                        -self.control_direction
+                    )  # opposite of control direction, same as the original normal
                 else:
                     ref_force_vector = np.array(self.ref_force)
                 force_error_vector = ref_force_vector - current_force_vector
-                force_output_vector = self.force_pid.update(force_error_vector)
+                force_output_vector, force_p_term, force_i_term, force_d_term = (
+                    self.force_pid.update(force_error_vector)
+                )
 
                 # === 3D POSITION CONTROL ===
                 position_error_vector = self.target_position - current_position
-                position_output_vector = self.pose_pid.update(position_error_vector)
+                position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
+                    self.pose_pid.update(position_error_vector)
+                )
 
                 # === COMBINE 3D OUTPUTS ===
                 total_output_vector = -force_output_vector + position_output_vector
@@ -371,10 +335,16 @@ class URForceController(URController):
                     "force_output_vector": force_output_vector.copy(),
                     "position_output_vector": position_output_vector.copy(),
                     "total_output_vector": total_output_vector.copy(),
+                    "force_p_term": force_p_term.copy(),
+                    "force_i_term": force_i_term.copy(),
+                    "force_d_term": force_d_term.copy(),
+                    "pos_p_term": pos_p_term.copy(),
+                    "pos_i_term": pos_i_term.copy(),
+                    "pos_d_term": pos_d_term.copy(),
                 }
                 self.control_data.append(data_point)
 
-                self.speedL_world(speed_command, acceleration=0.1, time_duration=0.1)
+                self.speedL_world(speed_command, acceleration=0.1, time_duration=0.01)
 
             except Exception as e:
                 print(f"Control error: {e}")
@@ -398,116 +368,6 @@ class URForceController(URController):
         self.control_active = False
         print("3D vector control loop ended")
 
-    def _control_loop(self):
-        """Main dual PID control loop"""
-        control_period = 1.0 / self.control_rate_hz
-
-        while self.control_active and not self.control_stop.is_set():
-            loop_start = time.time()
-
-            try:
-                current_state = self.get_state()
-
-                current_force_vector = np.array(current_state["filtered_force"][:3])
-                current_position = np.array(current_state["pose_world"][:3])
-                # Log data
-
-                # === FORCE CONTROL ===
-                ref_force_in_direction = self.ref_force * -self.control_direction
-                force_error = ref_force_in_direction - current_force_vector
-                force_output = self.force_pid.update(force_error)
-
-                print("-------")
-                print(f"Reference force vector: {self.ref_force}")
-                print(f"Control direction (negated): {self.control_direction}")
-                print(f"Reference force in control direction: {ref_force_in_direction}")
-                print(f"Current force vector: {current_force_vector}")
-                print(f"Force error: {force_error}")
-
-                # === POSITION CONTROL ===
-                position_in_direction = np.dot(
-                    current_position - self.target_position, self.control_direction
-                )
-                position_error = -position_in_direction
-                position_output = self.pose_pid.update(position_error)
-
-                print(f"Current position: {current_position}")
-                print(f"Target position: {self.target_position}")
-                print(
-                    f"Position difference (current - target): {current_position - self.target_position}"
-                )
-                print(f"Control direction: {self.control_direction}")
-                print(
-                    f"Position displacement in control direction: {position_in_direction}"
-                )
-                print(f"Position error: {position_error}")
-
-                total_output = force_output + position_output
-
-                velocity = self.control_direction * total_output
-                speed_command = [velocity[0], velocity[1], velocity[2], 0, 0, 0]
-
-                print(f"Position PID output: {position_output}")
-                print(f"Force PID output: {force_output}")
-                print(f"Total output (force + position): {total_output}")
-                print(f"Velocity vector: {velocity}")
-                print(f"Speed command [vx, vy, vz, wx, wy, wz]: {speed_command}")
-                print("-------")
-
-                data_point = {
-                    "timestamp": time.time() - self.start_time,
-                    "force_vector": current_force_vector.copy(),
-                    "position": current_position.copy(),
-                    "target_position": self.target_position.copy(),
-                    "reference_force": self.ref_force,
-                    "force_output": force_output,
-                    "position_output": position_output,
-                    "total_output": total_output,
-                }
-                self.control_data.append(data_point)
-
-                # Safety checks
-                distance_moved = np.linalg.norm(current_position - self.start_position)
-                if distance_moved >= self.distance_cap:
-                    print(f"Distance cap reached: {distance_moved:.3f}m")
-                    break
-
-                if time.time() - self.start_time >= self.control_timeout:
-                    print(f"Control timeout reached")
-                    break
-
-                self.speedL_world(speed_command, acceleration=0.1, time_duration=0.1)
-
-                # Debug output (every 1 second)
-                if int(time.time() * 1) % 1 == 0 and int(time.time() * 10) % 10 == 0:
-                    print(
-                        f"Pos error: {position_error:.3f}m, "
-                        f"Combined output: {total_output:.3f}, "
-                        f"Distance: {distance_moved:.3f}m"
-                    )
-
-            except Exception as e:
-                print(f"Control error: {e}")
-                try:
-                    self.speedStop()
-                except:
-                    pass
-                break
-
-            # Maintain control rate
-            elapsed = time.time() - loop_start
-            sleep_time = max(0, control_period - elapsed)
-            time.sleep(sleep_time)
-
-        # Clean stop
-        try:
-            self.speedStop()
-        except:
-            pass
-
-        self.control_active = False
-        print("Dual control loop ended")
-
     def wait_for_control(self):
         """Wait for force control to complete"""
         if self.control_thread and self.control_thread.is_alive():
@@ -527,303 +387,236 @@ class URForceController(URController):
         self.stop_control()
         super().disconnect()
 
-    def plot_data(self):
-        """Generate comprehensive plots for control data including pose reference tracking"""
+    def plot_PID(self):
+        """Generate comprehensive plots for logged PID components"""
         if not self.control_data:
             print("No data to plot")
             return
 
+        # Check if PID components are logged
+        if "force_p_term" not in self.control_data[0]:
+            print(
+                "PID components not logged in control data. Make sure you're using the updated _control_loop3D method."
+            )
+            return
+
         # Extract data from logged data
         timestamps = [d["timestamp"] for d in self.control_data]
-        force_vectors = np.array([d["force_vector"] for d in self.control_data])
-        positions = np.array([d["position"] for d in self.control_data])
-        target_positions = np.array([d["target_position"] for d in self.control_data])
-        ref_forces = [d["reference_force"] for d in self.control_data]
 
-        # Handle both 3D and 6D target positions (extract only position part)
-        if target_positions.shape[1] == 6:
-            target_positions = target_positions[
-                :, :3
-            ]  # Extract only xyz, ignore rotation
-        elif target_positions.shape[1] != 3:
-            print(
-                f"Warning: Unexpected target_position shape {target_positions.shape}, using first 3 elements"
-            )
-            target_positions = target_positions[:, :3]
+        # Extract logged PID components
+        force_p_terms = np.array([d["force_p_term"] for d in self.control_data])
+        force_i_terms = np.array([d["force_i_term"] for d in self.control_data])
+        force_d_terms = np.array([d["force_d_term"] for d in self.control_data])
 
-        # Calculate derived metrics
-        force_magnitudes = np.linalg.norm(force_vectors, axis=1)
-        force_in_direction = [
-            np.dot(fv, self.control_direction) for fv in force_vectors
-        ]
-        distances_from_start = np.linalg.norm(positions - self.start_position, axis=1)
+        pos_p_terms = np.array([d["pos_p_term"] for d in self.control_data])
+        pos_i_terms = np.array([d["pos_i_term"] for d in self.control_data])
+        pos_d_terms = np.array([d["pos_d_term"] for d in self.control_data])
 
-        # Position errors in control direction (now both are 3D)
-        position_errors_in_direction = [
-            np.dot(pos - target, self.control_direction)
-            for pos, target in zip(positions, target_positions)
-        ]
+        # Calculate combined terms
+        force_total = force_p_terms + force_i_terms + force_d_terms
+        pos_total = pos_p_terms + pos_i_terms + pos_d_terms
+        combined_total = force_total + pos_total
 
-        force_errors_val = np.array(
-            [ref - abs(f_dir) for ref, f_dir in zip(ref_forces, force_in_direction)]
-        )
-
-        position_errors_magnitude = np.linalg.norm(positions - target_positions, axis=1)
-
-        total_errors = np.abs(force_errors_val) + np.abs(position_errors_magnitude)
-
-        force_outputs = np.array([d["force_output"] for d in self.control_data])
-        position_outputs = np.array([d["position_output"] for d in self.control_data])
-        total_outputs = force_outputs + position_outputs
-
+        # Setup plot
         current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        initial_target_pose_str = f"[{self.target_position[0]:.3f}, {self.target_position[1]:.3f}, {self.target_position[2]:.3f}]"
 
-        force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
-        pose_pid_str = f"Kp={self.pose_pid.kp:.3f}, Ki={self.pose_pid.ki:.3f}, Kd={self.pose_pid.kd:.3f}"
+        # PID parameters (handle both scalar and vector PIDs)
+        if hasattr(self.force_pid, "kp") and np.isscalar(self.force_pid.kp):
+            force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
+        else:
+            force_pid_str = f"Kp={self.force_pid.kp}, Ki={self.force_pid.ki}, Kd={self.force_pid.kd}"
 
-        plt.figure(figsize=(18, 10))
+        if hasattr(self.pose_pid, "kp") and np.isscalar(self.pose_pid.kp):
+            pose_pid_str = f"Kp={self.pose_pid.kp:.3f}, Ki={self.pose_pid.ki:.3f}, Kd={self.pose_pid.kd:.3f}"
+        else:
+            pose_pid_str = (
+                f"Kp={self.pose_pid.kp}, Ki={self.pose_pid.ki}, Kd={self.pose_pid.kd}"
+            )
 
-        # Main title for the entire figure
+        plt.figure(figsize=(20, 12))
+
+        # Main title
         plt.suptitle(
-            f"Control Data Plot ({current_datetime})\n"
-            f"Ref Force: {self.ref_force:.2f}N, Target Pose: {initial_target_pose_str}\n"
+            f"PID Components Analysis ({current_datetime})\n"
             f"Force PID: ({force_pid_str}), Pose PID: ({pose_pid_str})",
             fontsize=16,
-            y=1.02,  # Adjust y to move title up
+            y=0.98,
         )
 
-        # === ROW 1: Reference Tracking and Movement ===
+        colors = ["red", "green", "blue"]
+        axis_labels = ["X", "Y", "Z"]
 
-        # 1. Force Magnitude and Reference Tracking (formerly subplot 3,3,2)
-        plt.subplot(2, 3, 1)  # Changed to 2 rows, 3 columns, plot 1
-        plt.plot(
-            timestamps,
-            force_magnitudes,
-            label="Force Magnitude",
-            linewidth=2,
-            color="purple",
-        )
-        plt.plot(
-            timestamps,
-            [abs(f) for f in force_in_direction],
-            label="Force in Direction",
-            linewidth=2,
-            color="orange",
-        )
-        plt.plot(
-            timestamps,
-            ref_forces,
-            label="Reference Force",
-            linewidth=3,
-            color="red",
-            linestyle="--",
-        )
-        plt.title("Force Magnitude vs Reference")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Force (N)")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        # === COLUMN 1: Force PID Components ===
 
-        # 2. Position vs Target Position (formerly subplot 3,3,4)
-        plt.subplot(2, 3, 2)  # Changed to 2 rows, 3 columns, plot 2
-        plt.plot(
-            timestamps, positions[:, 0], label="X Position", linewidth=2, color="red"
-        )
-        plt.plot(
-            timestamps, positions[:, 1], label="Y Position", linewidth=2, color="green"
-        )
-        plt.plot(
-            timestamps, positions[:, 2], label="Z Position", linewidth=2, color="blue"
-        )
-        plt.plot(
-            timestamps,
-            target_positions[:, 0],
-            label="X Target",
-            linewidth=2,
-            linestyle="--",
-            color="red",
-            alpha=0.7,
-        )
-        plt.plot(
-            timestamps,
-            target_positions[:, 1],
-            label="Y Target",
-            linewidth=2,
-            linestyle="--",
-            color="green",
-            alpha=0.7,
-        )
-        plt.plot(
-            timestamps,
-            target_positions[:, 2],
-            label="Z Target",
-            linewidth=2,
-            linestyle="--",
-            color="blue",
-            alpha=0.7,
-        )
-        plt.title("Position vs Target Position")
-        plt.xlabel("Time (s)")
-        plt.ylabel("Position (m)")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-
-        # 3. Movement Distance vs Time (formerly subplot 3,3,6)
-        plt.subplot(2, 3, 3)  # Changed to 2 rows, 3 columns, plot 3
-        plt.plot(
-            timestamps,
-            distances_from_start,
-            label="Distance from Start",
-            linewidth=2,
-            color="brown",
-        )
-        if hasattr(self, "distance_cap"):
-            plt.axhline(
-                y=self.distance_cap,
-                color="red",
-                linestyle="--",
+        # 1. Force P Terms
+        plt.subplot(3, 3, 1)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                force_p_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
                 linewidth=2,
-                label=f"Distance Cap ({self.distance_cap}m)",
+                color=colors[axis],
             )
-        plt.title("Movement Distance vs Time")
+        plt.title("Force PID - Proportional Terms")
         plt.xlabel("Time (s)")
-        plt.ylabel("Distance (m)")
+        plt.ylabel("P Term Output")
         plt.legend()
         plt.grid(True, alpha=0.3)
-
-        # === ROW 2: Error Analysis ===
-
-        # 4. Force Control Error (formerly subplot 3,3,3)
-        plt.subplot(2, 3, 4)  # Changed to 2 rows, 3 columns, plot 4
-        plt.plot(
-            timestamps,
-            force_errors_val,
-            label="Force Error",
-            linewidth=2,
-            color="darkred",
-        )
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-        if hasattr(self, "min_force_threshold"):
-            plt.axhline(
-                y=self.min_force_threshold,
-                color="orange",
-                linestyle="--",
+
+        # 4. Force I Terms
+        plt.subplot(3, 3, 4)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                force_i_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
                 linewidth=2,
-                label=f"Threshold (±{self.min_force_threshold}N)",
+                color=colors[axis],
             )
-            plt.axhline(
-                y=-self.min_force_threshold, color="orange", linestyle="--", linewidth=2
+        plt.title("Force PID - Integral Terms")
+        plt.xlabel("Time (s)")
+        plt.ylabel("I Term Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+
+        # 7. Force D Terms
+        plt.subplot(3, 3, 7)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                force_d_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
             )
-        plt.title("Force Control Error")
+        plt.title("Force PID - Derivative Terms")
         plt.xlabel("Time (s)")
-        plt.ylabel("Force Error (N)")
+        plt.ylabel("D Term Output")
         plt.legend()
         plt.grid(True, alpha=0.3)
-
-        # 5. Position Error in Control Direction (formerly subplot 3,3,5)
-        plt.subplot(2, 3, 5)  # Changed to 2 rows, 3 columns, plot 5
-        plt.plot(
-            timestamps,
-            position_errors_in_direction,
-            label="Position Error in Control Direction",
-            linewidth=2,
-            color="darkgreen",
-        )
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-        plt.title("Position Error in Control Direction")
+
+        # === COLUMN 2: Position PID Components ===
+
+        # 2. Position P Terms
+        plt.subplot(3, 3, 2)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                pos_p_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Position PID - Proportional Terms")
         plt.xlabel("Time (s)")
-        plt.ylabel("Position Error (m)")
+        plt.ylabel("P Term Output")
         plt.legend()
         plt.grid(True, alpha=0.3)
-
-        # 6. Total Error Plot (NEW)
-        plt.subplot(2, 3, 6)
-        plt.plot(
-            timestamps, force_outputs, label="Force Output", linewidth=2, color="red"
-        )
-        plt.plot(
-            timestamps,
-            position_outputs,
-            label="Position Output",
-            linewidth=2,
-            color="blue",
-        )
-        plt.plot(
-            timestamps, total_outputs, label="Total Output", linewidth=2, color="purple"
-        )
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-        plt.title("Control Outputs")
+
+        # 5. Position I Terms
+        plt.subplot(3, 3, 5)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                pos_i_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Position PID - Integral Terms")
         plt.xlabel("Time (s)")
-        plt.ylabel("Control Output")
+        plt.ylabel("I Term Output")
         plt.legend()
         plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        plt.tight_layout(
-            rect=[0, 0.03, 1, 0.95]
-        )  # Adjust rect to make space for suptitle
+        # 8. Position D Terms
+        plt.subplot(3, 3, 8)
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                pos_d_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Position PID - Derivative Terms")
+        plt.xlabel("Time (s)")
+        plt.ylabel("D Term Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # Save filename with date
+        # === COLUMN 3: Combined P, I, D Terms ===
+
+        # 3. Combined P Terms (Force + Position)
+        plt.subplot(3, 3, 3)
+        combined_p_terms = force_p_terms + pos_p_terms
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                combined_p_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Combined P Terms (Force + Position)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Combined P Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+
+        # 6. Combined I Terms (Force + Position)
+        plt.subplot(3, 3, 6)
+        combined_i_terms = force_i_terms + pos_i_terms
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                combined_i_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Combined I Terms (Force + Position)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Combined I Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+
+        # 9. Combined D Terms (Force + Position)
+        plt.subplot(3, 3, 9)
+        combined_d_terms = force_d_terms + pos_d_terms
+        for axis in range(3):
+            plt.plot(
+                timestamps,
+                combined_d_terms[:, axis],
+                label=f"{axis_labels[axis]} Axis",
+                linewidth=2,
+                color=colors[axis],
+            )
+        plt.title("Combined D Terms (Force + Position)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Combined D Output")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        # Save the plot
         filename = (
-            f"plots/comprehensive_control_plot_{current_datetime}_{self.robot_id}.png"
+            f"plots/pid_components_analysis_{current_datetime}_{self.robot_id}.png"
         )
         os.makedirs("plots", exist_ok=True)
         plt.savefig(filename, dpi=150, bbox_inches="tight")
         plt.close()
-
-        # Print comprehensive summary statistics
-        if timestamps:
-            final_force = force_in_direction[-1] if force_in_direction else 0
-            final_ref_force = ref_forces[-1] if ref_forces else 0
-            max_distance = (
-                max(distances_from_start) if len(distances_from_start) > 0 else 0
-            )
-            control_duration = timestamps[-1]
-            final_position_error = (
-                position_errors_in_direction[-1] if position_errors_in_direction else 0
-            )
-
-            avg_force_error = np.mean(
-                np.abs(force_errors_val)
-            )  # Use abs for average error
-            avg_position_error = np.mean(
-                np.abs(position_errors_in_direction)
-            )  # Use abs for average error
-
-            print("=" * 60)
-            print("COMPREHENSIVE CONTROL SUMMARY")
-            print("=" * 60)
-            print(f"Plot saved as: {filename} ({len(self.control_data)} samples)")
-            print(f"Control duration: {control_duration:.2f}s")
-            print("")
-            print("FORCE TRACKING:")
-            print(f"  Final force: {final_force:.2f}N")
-            print(f"  Reference force: {final_ref_force:.2f}N")
-            print(f"  Force error: {abs(final_ref_force - abs(final_force)):.2f}N")
-            print(f"  Average force error: {avg_force_error:.2f}N")
-            print("")
-            print("POSITION TRACKING:")
-            print(f"  Max distance moved: {max_distance:.3f}m")
-            if hasattr(self, "distance_cap"):
-                print(f"  Distance cap: {self.distance_cap}m")
-            print(
-                f"  Final position error (in control dir): {final_position_error:.3f}m"
-            )
-            print(f"  Average position error: {avg_position_error:.3f}m")
-            print("")
-            print("CONTROL PARAMETERS:")
-            print(
-                f"  Control direction: [{self.control_direction[0]:.2f}, {self.control_direction[1]:.2f}, {self.control_direction[2]:.2f}]"
-            )
-            print(
-                f"  Force PID: kp={self.force_pid.kp}, ki={self.force_pid.ki}, kd={self.force_pid.kd}"
-            )
-            print(
-                f"  Pose PID: kp={self.pose_pid.kp}, ki={self.pose_pid.ki}, kd={self.pose_pid.kd}"
-            )
-            print("=" * 60)
-        else:
-            print("No data available for summary statistics")
 
     def plot_data3D(self):
         """Generate comprehensive plots for control data including pose reference tracking"""
@@ -1351,19 +1144,26 @@ class URForceController(URController):
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 180
+    reference_force = 120  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
     kp_f = 0.0015 * factor
-    ki_f = 0.00005 * factor
-    kd_f = 0.000225 * factor
+    ki_f = 0.0000 * factor
+    kd_f = 0.000025 * factor
 
-    kp_p = 1.1
+    kp_p = 1  # 0.5
     ki_p = 0.00005
-    kd_p = 0.34
+    kd_p = 0.34  # 0.0025
 
     alpha = 0.99
+    timeout = 20
+
+    lifting = [
+        {"time": 4.0, "position": [0, 0, 0.2]},
+        {"time": 8.0, "position": [-1, 0, 0]},
+        {"time": 16.0, "position": [0, 0, -0.2]},
+    ]
 
     robotL = URForceController(
         "192.168.1.33",
@@ -1375,7 +1175,6 @@ if __name__ == "__main__":
         ki_p=ki_p,
         kd_p=kd_p,
     )
-
     robotR = URForceController(
         "192.168.1.66",
         hz=hz,
@@ -1388,8 +1187,6 @@ if __name__ == "__main__":
     )
     robotL.alpha = alpha
     robotR.alpha = alpha
-    robotL.lifting = True
-    robotR.lifting = True
 
     try:
         robotL.moveJ(
@@ -1420,20 +1217,24 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=20.0,
+            timeout=timeout,
+            pose_updates=lifting,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=20.0,
+            timeout=timeout,
+            pose_updates=lifting,
         )
 
         robotR.wait_for_control()
         robotL.wait_for_control()
 
         robotR.plot_data3D()
+        robotR.plot_PID()
         robotL.plot_data3D()
+        robotL.plot_PID()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

@@ -1,4 +1,4 @@
-from control.ur_force_controller import URForceController
+from control.ur_pid_controller import URForceController
 import numpy as np
 
 if __name__ == "__main__":
@@ -15,7 +15,7 @@ if __name__ == "__main__":
     alpha = 0.99
 
     robot = URForceController(
-        "192.168.1.66",
+        "192.168.1.33",
         hz=hz,
         kp_f=kp_f,
         ki_f=ki_f,
