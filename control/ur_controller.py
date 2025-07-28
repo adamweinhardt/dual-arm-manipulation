@@ -260,18 +260,21 @@ class URController(threading.Thread):
 
         try:
             vel_world = np.array(speed_world[:3])
+            omega_world = np.array(speed_world[3:6])
 
             world_to_robot = np.linalg.inv(self.robot_config)
             robot_rotation = world_to_robot[:3, :3]
+
             vel_robot_base = robot_rotation @ vel_world
+            omega_robot_base = omega_world
 
             speed_command = [
                 vel_robot_base[0],
                 vel_robot_base[1],
                 vel_robot_base[2],
-                0,
-                0,
-                0,
+                omega_robot_base[0],
+                omega_robot_base[1],
+                omega_robot_base[2],
             ]
 
             self.speedL(
