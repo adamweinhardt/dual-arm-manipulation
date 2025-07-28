@@ -18,6 +18,7 @@ class Box:
     id: int
     position: np.ndarray  # [x, y, z]
     rotation_matrix: np.ndarray  # 3x3
+    quaternions: np.ndarray  # [w, x, y, z]
     confidence: float
     x_dim: float
     y_dim: float
@@ -141,6 +142,7 @@ class GraspingPointsCalculator:
                         id=board_id_int,
                         position=box_position,
                         rotation_matrix=rotation_matrix,
+                        quaternions=quaternion,
                         confidence=confidence,
                         x_dim=height,
                         y_dim=width,
