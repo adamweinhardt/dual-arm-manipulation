@@ -414,7 +414,8 @@ class GraspingPointsPublisher:
                                 "robot_assignment": grasping_pair.robot_assignment,
                                 "timestamp": float(time.time()),
                             }
-
+                        print(box.position)
+                        print(box.rotation_matrix)
                     if grasping_data:
                         message = {
                             "timestamp": float(time.time()),

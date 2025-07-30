@@ -4,6 +4,9 @@ import numpy as np
 import zmq
 import os
 import datetime
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from ur_controller import URController
 from scipy.spatial.transform import Rotation as R
@@ -11,6 +14,7 @@ from robot_ipc_control.pose_estimation.transform_utils import (
     rotmat_to_rvec,
     end_effector_rotation_from_normal,
 )
+import gc
 
 
 class VectorPIDController:
@@ -240,7 +244,7 @@ class URForceController(URController):
         self.control_thread.start()
 
     def control_to_target(
-        self, reference_force=None, distance_cap=0.2, timeout=30.0, pose_updates=None
+        self, reference_force=None, distance_cap=0.2, timeout=30.0, trajectory=None
     ):
         if self.control_active:
             print("Control already active!")
@@ -254,9 +258,7 @@ class URForceController(URController):
 
         current_state = self.get_state()
         self.start_position = np.array(current_state["gripper_world"][:3])
-        self.start_rotation = np.array(
-            current_state["gripper_world"][3:]
-        )  # ADD THIS LINE
+        self.start_rotation = np.array(current_state["gripper_world"][3:])
 
         if reference_position is None:
             self.reference_position = self.start_position.copy()
@@ -268,6 +270,8 @@ class URForceController(URController):
             self.reference_rotation
         ).as_matrix()
 
+        self.grasping_point = self.reference_position
+
         if reference_force is None:
             self.ref_force = 0.0
         else:
@@ -278,9 +282,9 @@ class URForceController(URController):
         self.control_timeout = timeout
         self.start_time = time.time()
 
-        self.pose_updates = pose_updates or []
-        self.applied_updates = set()
-        self.pose_updates.sort(key=lambda x: x["time"])
+        self.trajectory = np.load(trajectory)
+        self.pose_updates = self.trajectory["position"]
+        self.rot_updates = self.trajectory["rotation_matrices"]
 
         self.force_pid.reset()
         self.pose_pid.reset()
@@ -295,14 +299,22 @@ class URForceController(URController):
         self.control_thread.start()
 
     def _control_loop3D(self):
-        """Main 3D vector PID control loop"""
+        gc.disable()
         control_period = 1.0 / self.control_rate_hz
 
+        trajectory_started = False
+        trajectory_index = 0
+
+        loop_count = 0
+        loop_times = []
+
         while self.control_active and not self.control_stop.is_set():
-            loop_start = time.time()
+            loop_start = time.perf_counter()
 
             try:
+                t1 = time.perf_counter()
                 current_state = self.get_state()
+                t2 = time.perf_counter()
 
                 current_force_vector = np.array(
                     current_state["filtered_force_world"][:3]
@@ -327,38 +339,33 @@ class URForceController(URController):
 
                 current_time = time.time() - self.start_time
 
-                for i, update in enumerate(self.pose_updates):
-                    if i in self.applied_updates:
-                        continue
+                # Start trajectory after 2 seconds
+                if current_time >= 2.0 and not trajectory_started:
+                    trajectory_started = True
+                    print(f"Starting trajectory at t={current_time:.1f}s")
 
-                    if current_time >= update["time"]:
-                        print(f"Applying update {i} at t={current_time:.1f}s")
+                # Apply trajectory updates if started
+                if trajectory_started and trajectory_index < len(self.pose_updates):
+                    position_offset = self.pose_updates[trajectory_index]
+                    self.reference_position = self.grasping_point + position_offset
 
-                        if "position" in update:
-                            position_offset = np.array(update["position"])
-                            self.reference_position = (
-                                self.reference_position + position_offset
-                            )
-                            print(f"Position offset: {position_offset} m")
+                    # Add rotation offset
+                    rotation_offset = self.rot_updates[trajectory_index]
+                    offset_matrix = rotation_offset
+                    self.reference_rotation_matrix = (
+                        offset_matrix @ self.reference_rotation_matrix
+                    )
+                    self.reference_rotation = R.from_matrix(
+                        self.reference_rotation_matrix
+                    ).as_rotvec()
 
-                        if "rotation" in update:
-                            rotation_offset = np.array(update["rotation"])
-                            offset_matrix = R.from_rotvec(rotation_offset).as_matrix()
-                            self.reference_rotation_matrix = (
-                                offset_matrix @ self.reference_rotation_matrix
-                            )
-                            self.reference_rotation = R.from_matrix(
-                                self.reference_rotation_matrix
-                            ).as_rotvec()
-                            print(f"Rotation offset: {rotation_offset} rad")
+                    trajectory_index += 1
 
-                        self.applied_updates.add(i)
+                t3 = time.perf_counter()
 
                 # === 3D FORCE CONTROL ===
                 if np.isscalar(self.ref_force):
-                    ref_force_vector = self.ref_force * (
-                        -self.control_direction
-                    )  # opposite of control direction, same as the original normal
+                    ref_force_vector = self.ref_force * (-self.control_direction)
                 else:
                     ref_force_vector = np.array(self.ref_force)
                 force_error_vector = ref_force_vector - current_force_vector
@@ -392,36 +399,44 @@ class URForceController(URController):
                     rotation_output_vector[1],
                     rotation_output_vector[2],
                 ]
+                t4 = time.perf_counter()
 
                 # Data logging
                 data_point = {
                     "timestamp": time.time() - self.start_time,
-                    "force_vector": current_force_vector.copy(),
-                    "position": current_position.copy(),
-                    "rotation": current_rotation.copy(),
-                    "reference_position": self.reference_position.copy(),
-                    "reference_rotation": self.reference_rotation.copy(),
-                    "reference_force_vector": ref_force_vector.copy(),
-                    "position_error_vector": position_error_vector.copy(),
-                    "rotation_error_vector": rotation_error_vector.copy(),
-                    "force_error_vector": force_error_vector.copy(),
-                    "position_output_vector": position_output_vector.copy(),
-                    "rotation_output_vector": rotation_output_vector.copy(),
-                    "force_output_vector": force_output_vector.copy(),
-                    "total_output_vector": total_output_vector.copy(),
-                    "force_p_term": force_p_term.copy(),
-                    "force_i_term": force_i_term.copy(),
-                    "force_d_term": force_d_term.copy(),
-                    "pos_p_term": pos_p_term.copy(),
-                    "pos_i_term": pos_i_term.copy(),
-                    "pos_d_term": pos_d_term.copy(),
-                    "rot_p_term": rot_p_term.copy(),
-                    "rot_i_term": rot_i_term.copy(),
-                    "rot_d_term": rot_d_term.copy(),
+                    "force_vector": current_force_vector,
+                    "position": current_position,
+                    "rotation": current_rotation,
+                    "reference_position": self.reference_position,
+                    "reference_rotation": self.reference_rotation,
+                    "reference_force_vector": ref_force_vector,
+                    "position_error_vector": position_error_vector,
+                    "rotation_error_vector": rotation_error_vector,
+                    "force_error_vector": force_error_vector,
+                    "position_output_vector": position_output_vector,
+                    "rotation_output_vector": rotation_output_vector,
+                    "force_output_vector": force_output_vector,
+                    "total_output_vector": total_output_vector,
+                    "force_p_term": force_p_term,
+                    "force_i_term": force_i_term,
+                    "force_d_term": force_d_term,
+                    "pos_p_term": pos_p_term,
+                    "pos_i_term": pos_i_term,
+                    "pos_d_term": pos_d_term,
+                    "rot_p_term": rot_p_term,
+                    "rot_i_term": rot_i_term,
+                    "rot_d_term": rot_d_term,
                 }
+                t5 = time.perf_counter()
+
                 self.control_data.append(data_point)
 
-                self.speedL_world(speed_command, acceleration=0.25, time_duration=0.01)
+                t6 = time.perf_counter()
+
+                self.speedL_world(speed_command, acceleration=0.25, time_duration=0.001)
+                t7 = time.perf_counter()
+
+                loop_count += 1
 
             except Exception as e:
                 print(f"Control error: {e}")
@@ -432,9 +447,33 @@ class URForceController(URController):
                 break
 
             # Maintain control rate
-            elapsed = time.time() - loop_start
+            elapsed = time.perf_counter() - loop_start
             sleep_time = max(0, control_period - elapsed)
+            t8 = time.perf_counter()
+
             time.sleep(sleep_time)
+            t9 = time.perf_counter()
+
+            # Simple Hz calculation
+            loop_end = time.perf_counter()
+            loop_duration = loop_end - loop_start
+            loop_times.append(loop_duration)
+
+            t10 = time.perf_counter()
+
+            # # Print every 50 loops
+            # if loop_count % 50 == 0:
+            #     avg_loop_time = sum(loop_times) / len(loop_times)
+            #     actual_hz = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
+
+            #     print(
+            #         f"Hz: {actual_hz:.1f}/{self.control_rate_hz} | "
+            #         f"get_state={1000 * (t2 - t1):.1f}ms, calc={1000 * (t3 - t2):.1f}ms, "
+            #         f"control={1000 * (t4 - t3):.1f}ms, data_create={1000 * (t5 - t4):.1f}ms, "
+            #         f"data_append={1000 * (t6 - t5):.1f}ms, speedL={1000 * (t7 - t6):.1f}ms, "
+            #         f"sleep_calc={1000 * (t8 - t7):.1f}ms, sleep={1000 * (t9 - t8):.1f}ms, "
+            #         f"hz_calc={1000 * (t10 - t9):.1f}ms, total={1000 * (loop_end - loop_start):.1f}ms"
+            #     )
 
         # Clean stop
         try:
@@ -444,6 +483,7 @@ class URForceController(URController):
 
         self.control_active = False
         print("3D vector control loop ended")
+        gc.enable()
 
     def wait_for_control(self):
         """Wait for force control to complete"""
@@ -1606,14 +1646,14 @@ if __name__ == "__main__":
     ki_p = 0.00005
     kd_p = 0.34  # 0.0025
 
-    alpha = 0.99
-    timeout = 20
+    kp_r = 0
+    ki_r = 0
+    kd_r = 0
 
-    lifting = [
-        {"time": 4.0, "position": [0, 0, 0.2]},
-        {"time": 8.0, "position": [-1, 0, 0]},
-        {"time": 16.0, "position": [0, 0, -0.2]},
-    ]
+    alpha = 0.99
+    timeout = 13
+
+    trajectory = "motion_planner/trajectories/pick_and_place.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -1624,6 +1664,9 @@ if __name__ == "__main__":
         kp_p=kp_p,
         ki_p=ki_p,
         kd_p=kd_p,
+        kp_r=kp_r,
+        ki_r=ki_r,
+        kd_r=kd_r,
     )
     robotR = URForceController(
         "192.168.1.66",
@@ -1634,6 +1677,9 @@ if __name__ == "__main__":
         kp_p=kp_p,
         ki_p=ki_p,
         kd_p=kd_p,
+        kp_r=kp_r,
+        ki_r=ki_r,
+        kd_r=kd_r,
     )
     robotL.alpha = alpha
     robotR.alpha = alpha
@@ -1668,23 +1714,21 @@ if __name__ == "__main__":
             reference_force=reference_force,
             distance_cap=1.5,
             timeout=timeout,
-            pose_updates=lifting,
+            trajectory=trajectory,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
             timeout=timeout,
-            pose_updates=lifting,
+            trajectory=trajectory,
         )
 
         robotR.wait_for_control()
         robotL.wait_for_control()
 
         robotR.plot_data3D()
-        robotR.plot_PID()
         robotL.plot_data3D()
-        robotL.plot_PID()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
