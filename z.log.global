@@ -1,5 +1,5 @@
 ** compiled at:     Nov 26 2024 16:46:14
-** execution start: 2025-07-22 13:28:10:207183
+** execution start: 2025-07-28 15:20:11:652057
 graph.cpp:initParameters:1512(3) opening config file 'rai.cfg'
 graph.cpp:initParameters:1519(3)  - failed
 graph.cpp:initParameters:1525(3) opening base config file '/root/local/rai/../local.cfg'
@@ -38,8 +38,8 @@ util.cpp:getIs:1071(3) opening input file 'meshes/eSeries_UR5e_link4.obj'
 util.cpp:getIs:1071(3) opening input file 'meshes/eSeries_UR5e_link5.obj'
 util.cpp:getIs:1071(3) opening input file 'meshes/eSeries_UR5e_link6.obj'
 util.cpp:cd_start:1034(3) entering path '/home/weini/code/dual-arm-manipulation'
-** execution stop: 2025-07-22 14:52:19:193454
-** real time: 5048.99sec
-** CPU time: 2191.46
+** execution stop: 2025-07-28 15:22:15:484440
+** real time: 123.832sec
+** CPU time: 65.8278
 
 ** set+queried params:
