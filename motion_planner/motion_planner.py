@@ -757,15 +757,26 @@ if __name__ == "__main__":
         ]
     )
 
+    # 90 around z axis
+    pose5 = np.array(
+        [
+            [0, -1, 0, 0],
+            [1, 0, 0, 0],
+            [0, 0, 1, 0.2],
+            [0, 0, 0, 1],
+        ]
+    )
+
     hz = 100
     dt = 1 / hz
-    up = planner.linear(pose1, pose2, dt, max_velocity=1, max_acceleration=0.25)
-    side = planner.linear(pose2, pose3, dt, max_velocity=1, max_acceleration=0.25)
-    down = planner.linear(pose3, pose4, dt, max_velocity=1, max_acceleration=0.25)
+    up = planner.linear(pose1, pose2, dt, max_velocity=0.5, max_acceleration=0.25)
+    side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
+    down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
+    twist = planner.linear(pose2, pose5, dt, max_velocity=0.5, max_acceleration=0.25)
 
-    full_trajectory = planner.concatenate_trajectories([up, side, down])
+    full_trajectory = planner.concatenate_trajectories([up, twist])
     full_trajectory.plot_3d()
     full_trajectory.plot_profiles()
     plt.show()
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/pick_and_place.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/pick_and_twist.npz")
