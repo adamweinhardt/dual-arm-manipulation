@@ -8,7 +8,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from ur_controller import URController
+from control.ur_controller import URController
+from utils.utils import _make_T, _Rt_p_from_T
 from scipy.spatial.transform import Rotation as R
 from robot_ipc_control.pose_estimation.transform_utils import (
     rotmat_to_rvec,
@@ -235,6 +236,8 @@ class URForceController(URController):
         self.pose_pid.reset()
         self.rot_pid.reset()
         self.control_data = []
+        self.trajectory = None
+        self.deadzone_threshold = None
 
         self.rtde_control.zeroFtSensor()
 
@@ -244,7 +247,12 @@ class URForceController(URController):
         self.control_thread.start()
 
     def control_to_target(
-        self, reference_force=None, distance_cap=0.2, timeout=30.0, trajectory=None
+        self,
+        reference_force=None,
+        distance_cap=0.2,
+        timeout=30.0,
+        trajectory=None,
+        deadzone_threshold=None,
     ):
         if self.control_active:
             print("Control already active!")
@@ -253,38 +261,39 @@ class URForceController(URController):
         reference_position, _, normal = self.get_grasping_data()
 
         direction = -np.array(normal, dtype=float)  # into the surface
-
         direction = direction / np.linalg.norm(direction)
 
         current_state = self.get_state()
         self.start_position = np.array(current_state["gripper_world"][:3])
         self.start_rotation = np.array(current_state["gripper_world"][3:])
 
-        if reference_position is None:
-            self.reference_position = self.start_position.copy()
-        else:
-            self.reference_position = np.array(reference_position)
-
+        self.reference_position = (
+            np.array(reference_position)
+            if reference_position is not None
+            else self.start_position.copy()
+        )
         self.reference_rotation = self.start_rotation.copy()
         self.reference_rotation_matrix = R.from_rotvec(
             self.reference_rotation
         ).as_matrix()
 
         self.grasping_point = self.reference_position
+        self.grasping_rotation_matrix = self.reference_rotation_matrix
 
-        if reference_force is None:
-            self.ref_force = 0.0
-        else:
-            self.ref_force = reference_force
-
+        self.ref_force = reference_force if reference_force is not None else 0.0
         self.control_direction = direction
         self.distance_cap = distance_cap
         self.control_timeout = timeout
         self.start_time = time.time()
 
-        self.trajectory = np.load(trajectory)
-        self.pose_updates = self.trajectory["position"]
-        self.rot_updates = self.trajectory["rotation_matrices"]
+        if trajectory is not None:
+            self.trajectory = np.load(trajectory)
+            self.pose_updates = self.trajectory["position"]
+            self.rot_updates = self.trajectory["rotation_matrices"]
+        else:
+            self.trajectory = None
+            self.pose_updates = None
+            self.rot_updates = None
 
         self.force_pid.reset()
         self.pose_pid.reset()
@@ -292,6 +301,7 @@ class URForceController(URController):
         self.control_data = []
 
         self.rtde_control.zeroFtSensor()
+        self.deadzone_threshold = deadzone_threshold
 
         self.control_active = True
         self.control_stop.clear()
@@ -305,16 +315,11 @@ class URForceController(URController):
         trajectory_started = False
         trajectory_index = 0
 
-        loop_count = 0
-        loop_times = []
-
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
 
             try:
-                t1 = time.perf_counter()
                 current_state = self.get_state()
-                t2 = time.perf_counter()
 
                 current_force_vector = np.array(
                     current_state["filtered_force_world"][:3]
@@ -345,23 +350,27 @@ class URForceController(URController):
                     print(f"Starting trajectory at t={current_time:.1f}s")
 
                 # Apply trajectory updates if started
-                if trajectory_started and trajectory_index < len(self.pose_updates):
+                if (
+                    self.trajectory is not None
+                    and trajectory_started
+                    and trajectory_index < len(self.pose_updates)
+                ):
                     position_offset = self.pose_updates[trajectory_index]
                     self.reference_position = self.grasping_point + position_offset
 
                     # Add rotation offset
                     rotation_offset = self.rot_updates[trajectory_index]
+                    if self.robot_id == 1:
+                        rotation_offset = rotation_offset.T
                     offset_matrix = rotation_offset
                     self.reference_rotation_matrix = (
-                        offset_matrix @ self.reference_rotation_matrix
+                        offset_matrix @ self.grasping_rotation_matrix
                     )
                     self.reference_rotation = R.from_matrix(
                         self.reference_rotation_matrix
                     ).as_rotvec()
 
                     trajectory_index += 1
-
-                t3 = time.perf_counter()
 
                 # === 3D FORCE CONTROL ===
                 if np.isscalar(self.ref_force):
@@ -375,9 +384,18 @@ class URForceController(URController):
 
                 # === 3D POSITION CONTROL ===
                 position_error_vector = self.reference_position - current_position
-                position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
-                    self.pose_pid.update(position_error_vector)
-                )
+                position_error_norm = np.linalg.norm(position_error_vector)
+
+                if (
+                    self.deadzone_threshold is not None
+                    and position_error_norm <= self.deadzone_threshold
+                ):
+                    position_output_vector = np.zeros(3)
+                    pos_p_term = pos_i_term = pos_d_term = 0.0
+                else:
+                    position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
+                        self.pose_pid.update(position_error_vector)
+                    )
 
                 # === COMBINE 3D OUTPUTS ===
                 total_output_vector = -force_output_vector + position_output_vector
@@ -399,7 +417,6 @@ class URForceController(URController):
                     rotation_output_vector[1],
                     rotation_output_vector[2],
                 ]
-                t4 = time.perf_counter()
 
                 # Data logging
                 data_point = {
@@ -426,17 +443,12 @@ class URForceController(URController):
                     "rot_p_term": rot_p_term,
                     "rot_i_term": rot_i_term,
                     "rot_d_term": rot_d_term,
+                    "deadzone_threshold": self.deadzone_threshold,
                 }
-                t5 = time.perf_counter()
 
                 self.control_data.append(data_point)
 
-                t6 = time.perf_counter()
-
-                self.speedL_world(speed_command, acceleration=0.25, time_duration=0.001)
-                t7 = time.perf_counter()
-
-                loop_count += 1
+                self.speedL_world(speed_command, acceleration=0.18, time_duration=0.001)
 
             except Exception as e:
                 print(f"Control error: {e}")
@@ -449,31 +461,8 @@ class URForceController(URController):
             # Maintain control rate
             elapsed = time.perf_counter() - loop_start
             sleep_time = max(0, control_period - elapsed)
-            t8 = time.perf_counter()
 
             time.sleep(sleep_time)
-            t9 = time.perf_counter()
-
-            # Simple Hz calculation
-            loop_end = time.perf_counter()
-            loop_duration = loop_end - loop_start
-            loop_times.append(loop_duration)
-
-            t10 = time.perf_counter()
-
-            # # Print every 50 loops
-            # if loop_count % 50 == 0:
-            #     avg_loop_time = sum(loop_times) / len(loop_times)
-            #     actual_hz = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
-
-            #     print(
-            #         f"Hz: {actual_hz:.1f}/{self.control_rate_hz} | "
-            #         f"get_state={1000 * (t2 - t1):.1f}ms, calc={1000 * (t3 - t2):.1f}ms, "
-            #         f"control={1000 * (t4 - t3):.1f}ms, data_create={1000 * (t5 - t4):.1f}ms, "
-            #         f"data_append={1000 * (t6 - t5):.1f}ms, speedL={1000 * (t7 - t6):.1f}ms, "
-            #         f"sleep_calc={1000 * (t8 - t7):.1f}ms, sleep={1000 * (t9 - t8):.1f}ms, "
-            #         f"hz_calc={1000 * (t10 - t9):.1f}ms, total={1000 * (loop_end - loop_start):.1f}ms"
-            #     )
 
         # Clean stop
         try:
@@ -1260,6 +1249,22 @@ class URForceController(URController):
             linestyle="--",
         )
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+        deadzone_threshold = self.control_data[0].get("deadzone_threshold", None)
+        if deadzone_threshold is not None:
+            plt.axhline(
+                y=deadzone_threshold,
+                color="orange",
+                linestyle="dotted",
+                linewidth=2,
+                label=f"Deadzone +{deadzone_threshold:.2f}m",
+            )
+            plt.axhline(
+                y=-deadzone_threshold,
+                color="orange",
+                linestyle="dotted",
+                linewidth=2,
+                label=f"Deadzone -{deadzone_threshold:.2f}m",
+            )
         plt.title("3D Position Error Vectors")
         plt.xlabel("Time (s)")
         plt.ylabel("Position Error (m)")
@@ -1634,15 +1639,15 @@ class URForceController(URController):
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 120  # 150
+    reference_force = 100  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
     kp_f = 0.0015 * factor
     ki_f = 0.0000 * factor
-    kd_f = 0.000025 * factor
+    kd_f = 0.00002 * factor
 
-    kp_p = 1  # 0.5
+    kp_p = 0.9  # 0.5
     ki_p = 0.00005
     kd_p = 0.34  # 0.0025
 
@@ -1651,7 +1656,7 @@ if __name__ == "__main__":
     kd_r = 0
 
     alpha = 0.99
-    timeout = 13
+    timeout = 15
 
     trajectory = "motion_planner/trajectories/pick_and_place.npz"
 
@@ -1685,6 +1690,19 @@ if __name__ == "__main__":
     robotR.alpha = alpha
 
     try:
+        robotL.moveJ(
+            [
+                -0.9861305395709437,
+                -1.0489304226687928,
+                2.1829379240619105,
+                -2.6813165150084437,
+                -1.598926846181051,
+                3.818711757659912,
+            ]
+        )
+
+        robotL.wait_for_commands()
+
         robotL.moveJ(
             [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
         )

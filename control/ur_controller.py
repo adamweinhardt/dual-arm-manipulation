@@ -307,83 +307,42 @@ class URController(threading.Thread):
 
     def get_state(self):
         """Get robot state with detailed timing breakdown"""
-        t_start = time.perf_counter()
 
-        # === RTDE NETWORK CALLS (Usually the bottleneck) ===
-        t1 = time.perf_counter()
         pose_robot_base = self.rtde_receive.getActualTCPPose()
-        t2 = time.perf_counter()
 
         force_robot_base = np.array(self.rtde_receive.getActualTCPForce())
-        t3 = time.perf_counter()
 
         speed_robot_base = np.array(self.rtde_receive.getActualTCPSpeed())
-        t4 = time.perf_counter()
 
         joints = self.rtde_receive.getActualQ()
-        t5 = time.perf_counter()
 
         # === COORDINATE TRANSFORMATIONS ===
         pose_world = self.robot_2_world(pose_robot_base, self.robot_config)
-        t6 = time.perf_counter()
 
         rotation_robot_to_world = self.robot_config[:3, :3]
         linear_speed_world = rotation_robot_to_world @ speed_robot_base[:3]
         angular_speed_world = rotation_robot_to_world @ speed_robot_base[3:]
         speed_world = np.concatenate((linear_speed_world, angular_speed_world))
-        t7 = time.perf_counter()
 
         force_vector_world = rotation_robot_to_world @ force_robot_base[:3]
         torque_vector_world = rotation_robot_to_world @ force_robot_base[3:]
         force_world = np.concatenate((force_vector_world, torque_vector_world))
-        t8 = time.perf_counter()
 
         # === FILTERING ===
         filtered_force = self.force_low_pass_filter(
             self.previous_force, force_robot_base, self.alpha
         )
         self.previous_force = filtered_force
-        t9 = time.perf_counter()
 
         filtered_force_world = self.force_low_pass_filter(
             self.previous_force_world, force_vector_world, self.alpha
         )
         self.previous_force_world = filtered_force_world
-        t10 = time.perf_counter()
 
         # === FINAL CALCULATIONS ===
         gripper_world = pose_world - self.ee2marker_offset
-        t11 = time.perf_counter()
 
         self.forces.append([force_vector_world, filtered_force_world])
-        t_end = time.perf_counter()
-
-        # # === TIMING BREAKDOWN (print occasionally) ===
-        # if hasattr(self, "_get_state_call_count"):
-        #     self._get_state_call_count += 1
-        # else:
-        #     self._get_state_call_count = 1
-
-        # # Print timing every 100 calls to avoid spam
-        # if self._get_state_call_count % 1000 == 0:
-        #     total_time = (t_end - t_start) * 1000
-        #     print(f"\n=== get_state() Timing Breakdown (ms) ===")
-        #     print(f"TCP Pose:     {(t2 - t1) * 1000:.2f}ms")
-        #     print(f"TCP Force:    {(t3 - t2) * 1000:.2f}ms")
-        #     print(f"TCP Speed:    {(t4 - t3) * 1000:.2f}ms")
-        #     print(f"Joint State:  {(t5 - t4) * 1000:.2f}ms")
-        #     print(f"Coord Trans:  {(t6 - t5) * 1000:.2f}ms")
-        #     print(f"Speed Trans:  {(t7 - t6) * 1000:.2f}ms")
-        #     print(f"Force Trans:  {(t8 - t7) * 1000:.2f}ms")
-        #     print(f"Filter 1:     {(t9 - t8) * 1000:.2f}ms")
-        #     print(f"Filter 2:     {(t10 - t9) * 1000:.2f}ms")
-        #     print(f"Final Calc:   {(t11 - t10) * 1000:.2f}ms")
-        #     print(f"List Append:  {(t_end - t11) * 1000:.2f}ms")
-        #     print(f"TOTAL:        {total_time:.2f}ms")
-        #     print(
-        #         f"Network calls: {(t5 - t1) * 1000:.2f}ms ({((t5 - t1) / (t_end - t_start) * 100):.1f}%)"
-        #     )
-        #     print("=" * 45)
 
         return {
             "pose": pose_robot_base,
