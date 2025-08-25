@@ -22,7 +22,7 @@ if __name__ == "__main__":
     kd_r = 0
 
     alpha = 0.99
-    deadzone_threshold = 0.02
+    deadzone_threshold = 0.01
     trajectory = "motion_planner/trajectories/lifting.npz"
 
     robotL = URForceController(

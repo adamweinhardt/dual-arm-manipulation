@@ -148,10 +148,10 @@ class URForceController(URController):
             approach_point = grasping_info.get("approach_point1")
             normal_vector = grasping_info.get("normal1")
         else:
-            return None, None
+            return None, None, None
 
         if approach_point is None or normal_vector is None:
-            return None, None
+            return None, None, None
 
         return (
             np.array(grasping_point),
@@ -345,7 +345,7 @@ class URForceController(URController):
                 current_time = time.time() - self.start_time
 
                 # Start trajectory after 2 seconds
-                if current_time >= 2.0 and not trajectory_started:
+                if current_time >= 3.0 and not trajectory_started:
                     trajectory_started = True
                     print(f"Starting trajectory at t={current_time:.1f}s")
 
@@ -384,18 +384,17 @@ class URForceController(URController):
 
                 # === 3D POSITION CONTROL ===
                 position_error_vector = self.reference_position - current_position
-                position_error_norm = np.linalg.norm(position_error_vector)
 
-                if (
-                    self.deadzone_threshold is not None
-                    and position_error_norm <= self.deadzone_threshold
-                ):
-                    position_output_vector = np.zeros(3)
-                    pos_p_term = pos_i_term = pos_d_term = 0.0
-                else:
-                    position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
-                        self.pose_pid.update(position_error_vector)
-                    )
+                position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
+                    self.pose_pid.update(position_error_vector)
+                )
+                if self.deadzone_threshold is not None:
+                    for i in range(3):
+                        if abs(position_error_vector[i]) <= self.deadzone_threshold:
+                            position_output_vector[i] = 0.0
+                            pos_p_term[i] = 0.0
+                            pos_i_term[i] = 0.0
+                            pos_d_term[i] = 0.0
 
                 # === COMBINE 3D OUTPUTS ===
                 total_output_vector = -force_output_vector + position_output_vector
