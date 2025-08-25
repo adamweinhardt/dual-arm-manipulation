@@ -79,12 +79,17 @@ if __name__ == "__main__":
         robotR.wait_until_done()
         robotL.wait_until_done()
 
+        pL, _, _ = robotL.get_grasping_data()
+        pR, _, _ = robotR.get_grasping_data()
+        robotL.other_robot_grasp_point = np.array(pR)
+        robotR.other_robot_grasp_point = np.array(pL)
+
         time.sleep(0.1)
 
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=0.5,
-            timeout=30,
+            timeout=15,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -92,7 +97,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=0.5,
-            timeout=30,
+            timeout=15,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
