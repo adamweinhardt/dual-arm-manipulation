@@ -9,21 +9,21 @@ if __name__ == "__main__":
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0
-    ki_f = 0
-    kd_f = 0
+    kp_f = 0.002 * factor
+    ki_f = 0.0001 * factor
+    kd_f = 0.0004 * factor
 
-    kp_p = 0.9  # 0.5
+    kp_p = 2  # 0.5
     ki_p = 0.00005
-    kd_p = 0.34  # 0.0025
+    kd_p = 0.1  # 0.0025
 
-    kp_r = 0.8
+    kp_r = 0
     ki_r = 0
-    kd_r = 0.1
+    kd_r = 0
 
     alpha = 0.99
-    deadzone_threshold = None
-    trajectory = "motion_planner/trajectories/pick_and_twist.npz"
+    deadzone_threshold = 0.02
+    trajectory = "motion_planner/trajectories/side_y.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -79,25 +79,20 @@ if __name__ == "__main__":
         robotR.wait_until_done()
         robotL.wait_until_done()
 
-        pL, _, _ = robotL.get_grasping_data()
-        pR, _, _ = robotR.get_grasping_data()
-        robotL.other_robot_grasp_point = np.array(pR)
-        robotR.other_robot_grasp_point = np.array(pL)
-
         time.sleep(0.1)
 
         robotR.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.5,
-            timeout=15,
+            distance_cap=1.5,
+            timeout=17,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.5,
-            timeout=15,
+            distance_cap=1.5,
+            timeout=17,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
