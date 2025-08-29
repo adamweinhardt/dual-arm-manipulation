@@ -1,79 +1,202 @@
+# utils/transforms.py
+
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+# -------------------------------------------------
+# Basic SE(3) helpers
+# -------------------------------------------------
 
-def _make_T(self, Rm, p):
+
+def make_T(Rm: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Build a homogeneous transform T from rotation Rm (3x3) and translation t (3,)."""
     T = np.eye(4)
-    T[:3, :3] = Rm
-    T[:3, 3] = p
+    T[:3, :3] = np.asarray(Rm, dtype=float)
+    T[:3, 3] = np.asarray(t, dtype=float)
     return T
 
 
-def _Rt_p_from_T(self, T):
-    return T[:3, :3], T[:3, 3]
+def decompose_T(T: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (R, t) from homogeneous transform T (4x4)."""
+    return T[:3, :3].copy(), T[:3, 3].copy()
 
 
-def rvec_to_rotmat(rvec):
-    return R.from_rotvec(rvec).as_matrix()
+def invert_T(T: np.ndarray) -> np.ndarray:
+    """Invert a homogeneous transform T (4x4)."""
+    Rm, t = decompose_T(T)
+    Tinv = np.eye(4)
+    Tinv[:3, :3] = Rm.T
+    Tinv[:3, 3] = -Rm.T @ t
+    return Tinv
 
 
-def rotmat_to_rvec(rotmat):
-    return R.from_matrix(rotmat).as_rotvec()
+# -------------------------------------------------
+# Rotation conversions
+# -------------------------------------------------
 
 
-def end_effector_rotation_from_normal(normal_vector):
+def rvec_to_rotmat(rvec: np.ndarray) -> np.ndarray:
+    """Rodrigues rotation vector (3,) -> rotation matrix (3x3)."""
+    return R.from_rotvec(np.asarray(rvec, dtype=float)).as_matrix()
+
+
+def rotmat_to_rvec(rotmat: np.ndarray) -> np.ndarray:
+    """Rotation matrix (3x3) -> Rodrigues rotation vector (3,)."""
+    return R.from_matrix(np.asarray(rotmat, dtype=float)).as_rotvec()
+
+
+# -------------------------------------------------
+# Pose <-> Transform
+# -------------------------------------------------
+
+
+def pose6_to_T(pose6: np.ndarray) -> np.ndarray:
+    """Pose [x,y,z, rx,ry,rz] -> homogeneous transform (4x4)."""
+    pose6 = np.asarray(pose6, dtype=float)
+    T = np.eye(4)
+    T[:3, 3] = pose6[:3]
+    T[:3, :3] = rvec_to_rotmat(pose6[3:])
+    return T
+
+
+def T_to_pose6(T: np.ndarray) -> np.ndarray:
+    """Homogeneous transform (4x4) -> Pose [x,y,z, rx,ry,rz]."""
+    Rm, t = decompose_T(T)
+    rvec = rotmat_to_rvec(Rm)
+    return np.array([t[0], t[1], t[2], rvec[0], rvec[1], rvec[2]], dtype=float)
+
+
+# -------------------------------------------------
+# Transformations of different quantities
+# -------------------------------------------------
+
+
+def transform_point(T_a2b: np.ndarray, p_a: np.ndarray) -> np.ndarray:
+    """Transform a point from frame a to frame b using T_a2b."""
+    Rm, t = decompose_T(T_a2b)
+    return Rm @ np.asarray(p_a, dtype=float) + t
+
+
+def transform_rotation(T_a2b: np.ndarray, R_a: np.ndarray | np.ndarray) -> np.ndarray:
     """
-    Creates a 3x3 rotation matrix for an end-effector where:
-    1. The end-effector's local Y-axis is aligned with the input normal_vector.
-    2. The end-effector's local Z-axis points downward.
-    3. Right-handed coordinate system: X = Y × Z
+    Transform a rotation from frame a to b.
+    Input can be rotation matrix (3x3) or Rodrigues rvec (3,).
+    Output type matches input type.
     """
-    normal = np.array(normal_vector, dtype=float)
-    normal = normal / np.linalg.norm(normal)  # Ensure unit vector
-
-    local_y = normal
-
-    global_z_up = np.array([0, 0, 1])
-
-    if np.abs(np.dot(local_y, global_z_up)) > 0.99:
-        reference = np.array([1, 0, 0])
+    Rm, _ = decompose_T(T_a2b)
+    if np.shape(R_a) == (3,):
+        R_b = Rm @ rvec_to_rotmat(R_a)
+        return rotmat_to_rvec(R_b)
     else:
-        reference = global_z_up
-
-    local_x = np.cross(reference, local_y)
-    local_x = local_x / np.linalg.norm(local_x)
-
-    local_z = np.cross(local_x, local_y)
-    local_z = local_z / np.linalg.norm(local_z)
-
-    if local_z[2] > 0:
-        local_z = -local_z
-        local_x = np.cross(local_y, local_z)
-        local_x = local_x / np.linalg.norm(local_x)
-
-    rotation_matrix = np.column_stack([local_x, local_y, local_z])
-
-    det = np.linalg.det(rotation_matrix)
-    if not np.isclose(det, 1.0, atol=1e-6):
-        raise ValueError(
-            f"Invalid rotation matrix generated! Determinant = {det}, expected ~1.0"
-        )
-
-    should_be_identity = rotation_matrix @ rotation_matrix.T
-    if not np.allclose(should_be_identity, np.eye(3), atol=1e-6):
-        raise ValueError("Invalid rotation matrix generated! Matrix is not orthogonal")
-
-    return rotation_matrix
+        return Rm @ R_a
 
 
-def wrap_angles(angle):
+def transform_pose(T_a2b: np.ndarray, pose_a: np.ndarray) -> np.ndarray:
+    """Transform a 6D pose [x,y,z, rx,ry,rz] from frame a to b."""
+    T_pose_a = pose6_to_T(pose_a)
+    T_pose_b = T_a2b @ T_pose_a
+    return T_to_pose6(T_pose_b)
+
+
+def transform_twist(T_a2b: np.ndarray, twist_a: np.ndarray) -> np.ndarray:
     """
-    Wrap angles to [-π, π] range
-
-    Args:
-        angles: numpy array of angles in radians
-
-    Returns:
-        numpy array of wrapped angles in [-π, π] range
+    Transform a twist [vx,vy,vz, wx,wy,wz] from frame a to b.
+    Assumes same origin, only rotates v and ω.
     """
+    Rm, _ = decompose_T(T_a2b)
+    twist_a = np.asarray(twist_a, dtype=float)
+    v_b = Rm @ twist_a[:3]
+    w_b = Rm @ twist_a[3:]
+    return np.concatenate([v_b, w_b])
+
+
+def transform_wrench(T_a2b: np.ndarray, wrench_a: np.ndarray) -> np.ndarray:
+    """
+    Transform a wrench [Fx,Fy,Fz, Mx,My,Mz] from frame a to b.
+    Assumes same origin, only rotates F and M.
+    """
+    Rm, _ = decompose_T(T_a2b)
+    wrench_a = np.asarray(wrench_a, dtype=float)
+    f_b = Rm @ wrench_a[:3]
+    m_b = Rm @ wrench_a[3:]
+    return np.concatenate([f_b, m_b])
+
+
+# -------------------------------------------------
+# Utility
+# -------------------------------------------------
+
+
+def wrap_angles(angle: np.ndarray) -> np.ndarray:
+    """Wrap angles to [-π, π]."""
+    angle = np.asarray(angle, dtype=float)
     return np.arctan2(np.sin(angle), np.cos(angle))
+
+
+def _assert_rotmat(name, M):
+    A = np.asarray(M)
+    if A.shape != (3, 3):
+        print(f"[ASSERT ROTMAT FAIL] {name} shape={A.shape} -> converting if possible")
+        return _as_rotmat(A)
+    return A
+
+
+def _as_rotmat(maybe_rot):
+    """Accept a 3x3 rotation matrix or a 3-vector rotvec; return 3x3 matrix."""
+    arr = np.asarray(maybe_rot)
+    if arr.shape == (3, 3):
+        return arr
+    if arr.shape == (3,):
+        return R.from_rotvec(arr).as_matrix()
+    raise ValueError(f"Expected rotmat (3,3) or rotvec (3,), got {arr.shape}")
+
+
+def end_effector_rotation_from_normal(normal_vector, eps=1e-9):
+    """
+    TCP rotation with columns [x, y, z] such that:
+      - y points into the surface (aligned with normal_vector, normalized)
+      - z is the closest vector to global -Z while orthogonal to y
+      - x = y × z (right-handed)
+    """
+    n = np.asarray(normal_vector, dtype=float)
+    n_norm = np.linalg.norm(n)
+    if n_norm < eps:
+        raise ValueError("normal_vector has near-zero magnitude")
+    y = n / n_norm  # y -> into surface
+
+    g_down = np.array([0.0, 0.0, -1.0])  # global down
+
+    # Project global down onto plane orthogonal to y (best-possible 'down' given y)
+    z = g_down - np.dot(g_down, y) * y
+    z_norm = np.linalg.norm(z)
+    if z_norm < eps:
+        # y is (anti)parallel to global down; pick a horizontal fallback
+        # choose x-axis as fallback, then re-project
+        fallback = np.array([1.0, 0.0, 0.0])
+        z = fallback - np.dot(fallback, y) * y
+        z_norm = np.linalg.norm(z)
+        if z_norm < eps:
+            # extremely degenerate: pick y-orthogonal basis directly
+            # choose any vector not collinear with y
+            fallback = np.array([0.0, 1.0, 0.0])
+            z = fallback - np.dot(fallback, y) * y
+            z_norm = np.linalg.norm(z)
+    z = z / z_norm
+
+    x = np.cross(y, z)  # right-handed (z = x × y => x = y × z)
+    x_norm = np.linalg.norm(x)
+    if x_norm < eps:
+        raise ValueError("Failed to construct orthonormal basis")
+    x = x / x_norm
+
+    # Re-orthogonalize z to kill any numerical drift and ensure z = x × y
+    z = np.cross(x, y)
+
+    R = np.column_stack([x, y, z])
+
+    # sanity checks
+    if not np.allclose(R @ R.T, np.eye(3), atol=1e-6):
+        raise ValueError("Rotation not orthogonal")
+    if np.linalg.det(R) < 0.999999:
+        raise ValueError("Rotation not right-handed (det != 1)")
+    return R
