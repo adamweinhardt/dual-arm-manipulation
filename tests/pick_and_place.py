@@ -17,9 +17,9 @@ if __name__ == "__main__":
     ki_p = 0.00005
     kd_p = 0.34  # 0.0025
 
-    kp_r = 0
+    kp_r = 1.35
     ki_r = 0
-    kd_r = 0
+    kd_r = 0.1
 
     alpha = 0.99
     deadzone_threshold = 0.02
@@ -90,6 +90,11 @@ if __name__ == "__main__":
         robotL.wait_for_commands()
         robotR.wait_until_done()
         robotL.wait_until_done()
+
+        pL, _, _ = robotL.get_grasping_data()
+        pR, _, _ = robotR.get_grasping_data()
+        robotL.other_robot_grasp_point = np.array(pR)
+        robotR.other_robot_grasp_point = np.array(pL)
 
         time.sleep(0.1)
 

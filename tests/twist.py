@@ -5,19 +5,19 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 75  # 150
+    reference_force = 100  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0
-    ki_f = 0
-    kd_f = 0
+    kp_f = 0.002 * factor
+    ki_f = 0.0000 * factor
+    kd_f = 0.0001 * factor
 
-    kp_p = 0.9  # 0.5
+    kp_p = 1.5  # 0.5
     ki_p = 0.00005
-    kd_p = 0.34  # 0.0025
+    kd_p = 0.25  # 0.0025
 
-    kp_r = 0.8
+    kp_r = 1.7
     ki_r = 0
     kd_r = 0.1
 

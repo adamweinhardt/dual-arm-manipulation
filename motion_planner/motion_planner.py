@@ -787,11 +787,9 @@ if __name__ == "__main__":
         pose6, pose2, dt, max_velocity=0.3, max_acceleration=0.25
     )
 
-    full_trajectory = planner.concatenate_trajectories(
-        [up, side_y, side_y_back, side_y, side_y_back]
-    )
+    full_trajectory = planner.concatenate_trajectories([up, twist])
     full_trajectory.plot_3d()
     full_trajectory.plot_profiles()
     plt.show()
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/side_y.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/pick_and_twist.npz")
