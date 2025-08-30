@@ -228,14 +228,33 @@ class URForceController(URController):
         self.control_thread.start()
 
     # ---------------- shared frame helpers ----------------
+    def _canonicalize_pair(self, pA, pB):
+        d = pB - pA
+        axis = int(np.argmax(np.abs(d)))  # 0=x, 1=y, 2=z (dominant separation)
+        if d[axis] < 0:  # enforce positive along dominant axis
+            pA, pB = pB, pA
+        return pA, pB
+
     def _compute_initial_box_frame(self, pA, pB):
+        # --- canonicalize ordering so both arms build the SAME frame ---
+        pA, pB = self._canonicalize_pair(pA, pB)
+
         x_hat = (pB - pA) / (np.linalg.norm(pB - pA) + 1e-9)
-        z_hat = np.array([0, 0, 1]) - np.dot([0, 0, 1], x_hat) * x_hat
+
+        # project world-z onto plane orthogonal to x_hat; fallback if degenerate
+        z_guess = np.array([0, 0, 1])
+        z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
         if np.linalg.norm(z_hat) < 1e-6:
-            z_hat = np.array([0, 1, 0]) - np.dot([0, 1, 0], x_hat) * x_hat
+            z_guess = np.array([0, 1, 0])
+            z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
         z_hat /= np.linalg.norm(z_hat) + 1e-9
+
         y_hat = np.cross(z_hat, x_hat)
-        return np.column_stack([x_hat, y_hat, z_hat]), 0.5 * (pA + pB)
+        y_hat /= np.linalg.norm(y_hat) + 1e-9  # (tiny numeric guard)
+
+        R_WB0 = np.column_stack([x_hat, y_hat, z_hat])
+        p_WB0 = 0.5 * (pA + pB)
+        return R_WB0, p_WB0
 
     def _init_box_frame_and_grasp(self, grasping_point, grasping_point_other, R_WG0):
         self._R_WB0, self._p_WB0 = self._compute_initial_box_frame(
@@ -287,16 +306,6 @@ class URForceController(URController):
             traj_npz = np.load(trajectory)
             self.rot_updates = traj_npz["rotation_matrices"]
             self.pose_updates_stream = traj_npz.get("position", None)
-
-            ru = np.asarray(self.rot_updates)
-            if ru.ndim == 2 and ru.shape[1] == 3:
-                self.rot_updates = np.stack(
-                    [R.from_rotvec(v).as_matrix() for v in ru], axis=0
-                )
-            elif ru.ndim == 3 and ru.shape[1:] == (3, 3):
-                pass
-            else:
-                raise ValueError(f"rotation_matrices has unexpected shape {ru.shape}")
             self._traj_len = len(self.rot_updates)
 
             if (
@@ -309,6 +318,7 @@ class URForceController(URController):
                 np.array(self.other_robot_grasp_point),
                 R.from_rotvec(self.start_rotation).as_matrix(),
             )
+            print(self._r_B)
         else:
             self.rot_updates = None
             self.pose_updates_stream = None
@@ -326,9 +336,6 @@ class URForceController(URController):
         self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
         self.control_thread.start()
 
-    # ---------------------------
-    # Control Loop
-    # ---------------------------
     def _control_loop3D(self):
         control_period = 1.0 / self.control_rate_hz
 
@@ -344,7 +351,7 @@ class URForceController(URController):
                 current_rotation = np.array(state["pose"][3:6])  # rotvec
                 current_rotation_matrix = R.from_rotvec(current_rotation).as_matrix()
 
-                # --- Safety ---
+                # ========================= Safety ===========================
                 distance_moved = np.linalg.norm(current_position - self.start_position)
                 if distance_moved >= self.distance_cap:
                     print(f"Distance cap reached: {distance_moved:.3f}m")
@@ -360,22 +367,35 @@ class URForceController(URController):
                     trajectory_started = True
                     print(f"Starting trajectory at t={current_time:.1f}s")
 
-                # Trajectory
+                # =========================== Trajectory Updates ===========================
                 if (
                     self.rot_updates is not None
                     and trajectory_started
                     and trajectory_index < self._traj_len
                 ):
+                    # Position
                     position_offset = (
                         self.pose_updates_stream[trajectory_index]
                         if self.pose_updates_stream is not None
                         else np.zeros(3)
                     )
-                    self.reference_position = self.grasping_point + position_offset
-
                     R_B0B = _assert_rotmat(
                         "R_B0B(my traj)", self.rot_updates[trajectory_index]
                     )
+                    # 0.24598266184329987
+                    # 0.2031765729188919
+                    # 0.11178550869226456
+                    if self.robot_id == 0:
+                        offset = [-0.055, 0, 0]
+                    else:
+                        offset = [0.055, 0, 0]
+
+                    delta_p_rot_B = (R_B0B - np.eye(3)) @ (self._r_B + offset)
+                    delta_p_rot_W = self._R_WB0 @ delta_p_rot_B
+                    self.reference_position = (
+                        self.grasping_point + position_offset + delta_p_rot_W
+                    )
+                    # Rotation
                     R_WG_ref = self._compute_reference_rotation(R_B0B)
                     self.reference_rotation_matrix = _assert_rotmat(
                         "my ref_R (traj)", R_WG_ref
@@ -384,9 +404,20 @@ class URForceController(URController):
                         self.reference_rotation_matrix
                     ).as_rotvec()
 
+                    # Force
+                    R_WB = self._R_WB0 @ R_B0B
+                    if not hasattr(self, "_rhat_B"):
+                        self._rhat_B = self._r_B / (np.linalg.norm(self._r_B) + 1e-9)
+
+                    outward_normal_world = (
+                        R_WB @ self._rhat_B
+                    )  # points out of the box face
+                    self.control_direction = -outward_normal_world
+
                     trajectory_index += 1
 
-                # --- Force PID ---
+                # =========================== PID Control ===========================
+                # Force
                 ref_force_vector = (
                     self.ref_force * (-self.control_direction)
                     if np.isscalar(self.ref_force)
@@ -397,7 +428,7 @@ class URForceController(URController):
                     self.force_pid.update(force_error_vector)
                 )
 
-                # --- Position PID ---
+                # Position
                 position_error_vector = self.reference_position - current_position
                 position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
                     self.pose_pid.update(position_error_vector)
@@ -410,7 +441,7 @@ class URForceController(URController):
 
                 total_output_vector = -force_output_vector + position_output_vector
 
-                # --- Rotation PID ---
+                # Rotation
                 self.reference_rotation_matrix = _assert_rotmat(
                     "my ref_R (pre-err)", self.reference_rotation_matrix
                 )
@@ -422,7 +453,7 @@ class URForceController(URController):
                     self.rot_pid.update(rotation_error_vector)
                 )
 
-                # --- Command ---
+                # Command
                 speed_command = [*total_output_vector, *rotation_output_vector]
                 self.speedL_world(speed_command, acceleration=0.18, time_duration=0.001)
 
@@ -1506,134 +1537,3 @@ class URForceController(URController):
         os.makedirs("plots", exist_ok=True)
         plt.savefig(filename, dpi=150, bbox_inches="tight")
         plt.close()
-
-        # # Print comprehensive summary statistics
-        # if timestamps:
-        #     final_force_mag = force_magnitudes[-1] if len(force_magnitudes) > 0 else 0
-        #     final_ref_force_mag = (
-        #         reference_force_magnitudes[-1]
-        #         if len(reference_force_magnitudes) > 0
-        #         else 0
-        #     )
-        #     final_force_in_dir = force_in_direction[-1] if force_in_direction else 0
-        #     final_ref_force_in_dir = (
-        #         ref_force_in_direction[-1] if ref_force_in_direction else 0
-        #     )
-
-        #     max_distance = (
-        #         max(distances_from_start) if len(distances_from_start) > 0 else 0
-        #     )
-        #     control_duration = timestamps[-1]
-
-        #     final_position_error_mag = (
-        #         position_error_magnitudes[-1]
-        #         if len(position_error_magnitudes) > 0
-        #         else 0
-        #     )
-        #     final_position_error_dir = (
-        #         position_errors_in_direction[-1] if position_errors_in_direction else 0
-        #     )
-
-        #     avg_force_error_mag = np.mean(force_error_magnitudes)
-        #     avg_position_error_mag = np.mean(position_error_magnitudes)
-        #     avg_force_error_dir = np.mean(np.abs(force_errors_in_direction))
-        #     avg_position_error_dir = np.mean(np.abs(position_errors_in_direction))
-
-        #     control_summary_title = "6DOF" if has_rotation_data else "3DOF"
-        #     print("=" * 70)
-        #     print(f"COMPREHENSIVE {control_summary_title} VECTOR CONTROL SUMMARY")
-        #     print("=" * 70)
-        #     print(f"Plot saved as: {filename} ({len(self.control_data)} samples)")
-        #     print(f"Control duration: {control_duration:.2f}s")
-        #     print("")
-        #     print("FORCE TRACKING:")
-        #     print(f"  Final force magnitude: {final_force_mag:.3f}N")
-        #     print(f"  Reference force magnitude: {final_ref_force_mag:.3f}N")
-        #     print(f"  Final force in direction: {final_force_in_dir:.3f}N")
-        #     print(f"  Reference force in direction: {final_ref_force_in_dir:.3f}N")
-        #     print(
-        #         f"  Force error magnitude: {abs(final_ref_force_mag - final_force_mag):.3f}N"
-        #     )
-        #     print(f"  Average force error magnitude: {avg_force_error_mag:.3f}N")
-        #     print(f"  Average force error in direction: {avg_force_error_dir:.3f}N")
-        #     print("")
-        #     print("POSITION TRACKING:")
-        #     print(f"  Max distance moved: {max_distance:.3f}m")
-        #     if hasattr(self, "distance_cap"):
-        #         print(f"  Distance cap: {self.distance_cap}m")
-        #     print(f"  Final position error magnitude: {final_position_error_mag:.3f}m")
-        #     print(
-        #         f"  Final position error in direction: {final_position_error_dir:.3f}m"
-        #     )
-        #     print(f"  Average position error magnitude: {avg_position_error_mag:.3f}m")
-        #     print(
-        #         f"  Average position error in direction: {avg_position_error_dir:.3f}m"
-        #     )
-
-        #     # Add rotation tracking summary if available
-        #     if has_rotation_data:
-        #         final_rotation_error_mag = (
-        #             rotation_error_magnitudes[-1]
-        #             if len(rotation_error_magnitudes) > 0
-        #             else 0
-        #         )
-        #         avg_rotation_error_mag = np.mean(rotation_error_magnitudes)
-
-        #         print("")
-        #         print("ROTATION TRACKING:")
-        #         print(
-        #             f"  Final rotation error magnitude: {final_rotation_error_mag:.3f}°"
-        #         )
-        #         print(
-        #             f"  Average rotation error magnitude: {avg_rotation_error_mag:.3f}°"
-        #         )
-
-        #         final_rotation_deg = rotations[-1] if len(rotations) > 0 else [0, 0, 0]
-        #         final_ref_rotation_deg = (
-        #             reference_rotations[-1]
-        #             if len(reference_rotations) > 0
-        #             else [0, 0, 0]
-        #         )
-        #         print(
-        #             f"  Final rotation: [{final_rotation_deg[0]:.2f}°, {final_rotation_deg[1]:.2f}°, {final_rotation_deg[2]:.2f}°]"
-        #         )
-        #         print(
-        #             f"  Target rotation: [{final_ref_rotation_deg[0]:.2f}°, {final_ref_rotation_deg[1]:.2f}°, {final_ref_rotation_deg[2]:.2f}°]"
-        #         )
-
-        #     print("")
-        #     print("CONTROL PARAMETERS:")
-        #     print(
-        #         f"  Control direction: [{self.control_direction[0]:.2f}, {self.control_direction[1]:.2f}, {self.control_direction[2]:.2f}]"
-        #     )
-        #     print(f"  Force PID: {force_pid_str}")
-        #     print(f"  Pose PID: {pose_pid_str}")
-
-        #     if has_rotation_data:
-        #         # Get rotation PID string
-        #         if hasattr(self, "rot_pid"):
-        #             pid_obj = self.rot_pid
-        #         elif hasattr(self, "rot_pid"):
-        #             pid_obj = self.rot_pid
-        #         else:
-        #             pid_obj = None
-
-        #         if pid_obj:
-        #             if hasattr(pid_obj, "kp") and np.isscalar(pid_obj.kp):
-        #                 rot_pid_str = f"Kp={pid_obj.kp:.3f}, Ki={pid_obj.ki:.3f}, Kd={pid_obj.kd:.3f}"
-        #             else:
-        #                 rot_pid_str = (
-        #                     f"Kp={pid_obj.kp}, Ki={pid_obj.ki}, Kd={pid_obj.kd}"
-        #                 )
-        #             print(f"  Rotation PID: {rot_pid_str}")
-
-        #     print("")
-        #     print("FINAL OUTPUT MAGNITUDES:")
-        #     print(f"  Force output: {force_output_magnitudes[-1]:.6f}")
-        #     print(f"  Position output: {position_output_magnitudes[-1]:.6f}")
-        #     if has_rotation_data:
-        #         print(f"  Rotation output: {rotation_output_magnitudes[-1]:.6f}")
-        #     print(f"  Total linear output: {total_output_magnitudes[-1]:.6f}")
-        #     print("=" * 70)
-        # else:
-        #     print("No data available for summary statistics")
