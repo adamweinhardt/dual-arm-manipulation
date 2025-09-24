@@ -59,3 +59,7 @@ python3 visualizer/visualizer.py
 python3 control/dual_arm_controller.py
 ```
 
+### Reset for mac:
+```bash
+sudo networksetup -setdhcp "USB 10/100/1000 LAN"
+```
