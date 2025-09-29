@@ -23,7 +23,7 @@ class URController(threading.Thread):
         if self.ip == "192.168.1.66":
             self.robot_id = 1
             self.robot_config = np.load(
-                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
+                "/home/aweinhardt/Desktop/Thesis/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_right.npy"
             )
             self.port = 5559
             self.ee2marker_offset = np.array([0.00, 0.05753, -0.10, 0, 0, 0])
@@ -31,7 +31,7 @@ class URController(threading.Thread):
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
             self.robot_config = np.load(
-                "/home/weini/code/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
+                "/home/aweinhardt/Desktop/Thesis/dual-arm-manipulation/robot_ipc_control/calibration/base_pose_robot_left.npy"
             )
             self.port = 5556
             self.ee2marker_offset = np.array([0.00, -0.05753, -0.10, 0, 0, 0])

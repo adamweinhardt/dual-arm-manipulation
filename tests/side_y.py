@@ -1,27 +1,31 @@
-from control.ur_pid_controller import URForceController
+from control.ur_ff_controller import URForceController
 import numpy as np
 import time
 
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 75  # 150
+    reference_force = 80  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.002 * factor
-    ki_f = 0.0001 * factor
-    kd_f = 0.0004 * factor
+    kp_f = 0.0018 * factor
+    ki_f = 0.0000 * factor
+    kd_f = 0.0001 * factor
 
-    kp_p = 2  # 0.5
+    kp_p = 1.1  # 0.5
     ki_p = 0.00005
-    kd_p = 0.1  # 0.0025
+    kd_p = 0.08  # 0.0025
 
     kp_r = 0
     ki_r = 0
     kd_r = 0
 
-    alpha = 0.99
+    Kp_p = 0.4
+    Ki_p = 0
+    Kd_p = 0.05
+
+    alpha = 0.9
     deadzone_threshold = 0.02
     trajectory = "motion_planner/trajectories/side_y.npz"
 
@@ -37,6 +41,9 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
+        Kp_p=Kp_p,
+        Ki_p=Ki_p,
+        Kd_p=Kd_p,
     )
     robotR = URForceController(
         "192.168.1.66",
@@ -50,6 +57,9 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
+        Kp_p=Kp_p,
+        Ki_p=Ki_p,
+        Kd_p=Kd_p,
     )
 
     robotL.alpha = alpha
@@ -79,12 +89,17 @@ if __name__ == "__main__":
         robotR.wait_until_done()
         robotL.wait_until_done()
 
+        pL, _, _ = robotL.get_grasping_data()
+        pR, _, _ = robotR.get_grasping_data()
+        robotL.other_robot_grasp_point = np.array(pR)
+        robotR.other_robot_grasp_point = np.array(pL)
+
         time.sleep(0.1)
 
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=17,
+            timeout=40,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -92,7 +107,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=17,
+            timeout=40,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
