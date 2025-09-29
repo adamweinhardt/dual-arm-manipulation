@@ -80,6 +80,9 @@ class URForceController(URController):
         kp_r=0,
         ki_r=0,
         kd_r=0,
+        Kp_p=0,
+        Ki_p=0,
+        Kd_p=0,
     ):
         super().__init__(ip)
 
@@ -92,7 +95,7 @@ class URForceController(URController):
         self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f, dt=1 / hz)
         self.pose_pid = VectorPIDController(kp=kp_p, ki=ki_p, kd=kd_p, dt=1 / hz)
         self.rot_pid = VectorPIDController(kp=kp_r, ki=ki_r, kd=kd_r, dt=1 / hz)
-
+        self.ff_pose_pid = VectorPIDController(kp=Kp_p, ki=Ki_p, kd=Kd_p, dt=1 / hz)
         self.control_data = []
 
         # ZMQ
@@ -165,67 +168,6 @@ class URForceController(URController):
             world_rotation[2],
         ]
         self.moveL_gripper_world(world_pose)
-
-    def control_to_target_manual(
-        self,
-        reference_position=None,
-        reference_rotation=None,
-        reference_force=None,
-        direction=[0, 0, -1],
-        distance_cap=0.2,
-        timeout=30.0,
-        pose_updates=None,
-    ):
-        if self.control_active:
-            print("Control already active!")
-            return False
-
-        direction = np.array(direction, dtype=float)
-        direction = direction / np.linalg.norm(direction)
-
-        state = self.get_state()
-        self.start_position = np.array(state["gripper_world"][:3])
-        self.start_rotation = np.array(state["pose"][3:6])  # rotvec
-
-        # references
-        self.reference_position = (
-            np.array(reference_position)
-            if reference_position is not None
-            else self.start_position.copy()
-        )
-        self.reference_rotation = (
-            np.array(reference_rotation)
-            if reference_rotation is not None
-            else self.start_rotation.copy()
-        )
-        self.reference_rotation_matrix = _assert_rotmat(
-            "my ref_R (manual init)", R.from_rotvec(self.reference_rotation).as_matrix()
-        )
-
-        self.ref_force = 0.0 if reference_force is None else reference_force
-        self.control_direction = direction
-        self.distance_cap = distance_cap
-        self.control_timeout = timeout
-        self.start_time = time.time()
-
-        self.pose_updates = pose_updates or []
-        self.applied_updates = set()
-        self.pose_updates.sort(key=lambda x: x["time"])
-
-        # reset
-        self.force_pid.reset()
-        self.pose_pid.reset()
-        self.rot_pid.reset()
-        self.control_data = []
-        self.trajectory = None
-        self.deadzone_threshold = None
-
-        self.rtde_control.zeroFtSensor()
-
-        self.control_active = True
-        self.control_stop.clear()
-        self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
-        self.control_thread.start()
 
     # ---------------- shared frame helpers ----------------
     def _canonicalize_pair(self, pA, pB):
@@ -328,6 +270,7 @@ class URForceController(URController):
         self.force_pid.reset()
         self.pose_pid.reset()
         self.rot_pid.reset()
+        self.ff_pose_pid.reset()
         self.control_data.clear()
 
         self.rtde_control.zeroFtSensor()
@@ -436,7 +379,12 @@ class URForceController(URController):
                             position_output_vector[i] = 0.0
                             pos_p_term[i] = pos_i_term[i] = pos_d_term[i] = 0.0
 
-                total_output_vector = -force_output_vector + position_output_vector
+                # feedforward position
+                ff_position_output_vector, ff_pos_p_term, ff_pos_i_term, ff_pos_d_term = (
+                    self.ff_pose_pid.update(position_error_vector)
+                )
+
+                total_output_vector = -force_output_vector + position_output_vector + ff_position_output_vector
 
                 # Rotation
                 self.reference_rotation_matrix = _assert_rotmat(
@@ -467,10 +415,15 @@ class URForceController(URController):
                         "position_error_vector": position_error_vector,
                         "rotation_error_vector": rotation_error_vector,
                         "force_error_vector": force_error_vector,
+
+                        # outputs
                         "position_output_vector": position_output_vector,
                         "rotation_output_vector": rotation_output_vector,
                         "force_output_vector": force_output_vector,
+                        "ff_position_output_vector": ff_position_output_vector,   
                         "total_output_vector": total_output_vector,
+
+                        # PID terms
                         "force_p_term": force_p_term,
                         "force_i_term": force_i_term,
                         "force_d_term": force_d_term,
@@ -480,9 +433,16 @@ class URForceController(URController):
                         "rot_p_term": rot_p_term,
                         "rot_i_term": rot_i_term,
                         "rot_d_term": rot_d_term,
+
+                        # Feed-forward Pose PID terms
+                        "ff_pos_p_term": ff_pos_p_term,      
+                        "ff_pos_i_term": ff_pos_i_term,      
+                        "ff_pos_d_term": ff_pos_d_term,       
+
                         "deadzone_threshold": self.deadzone_threshold,
                     }
                 )
+
 
             except Exception as e:
                 print(f"Control error: {e}")
@@ -523,378 +483,8 @@ class URForceController(URController):
         self.stop_control()
         super().disconnect
 
-    def plot_PID(self):
-        """Generate comprehensive plots for logged PID components including rotation"""
-        if not self.control_data:
-            print("No data to plot")
-            return
-
-        # Check if PID components are logged
-        if "force_p_term" not in self.control_data[0]:
-            print(
-                "PID components not logged in control data. Make sure you're using the updated _control_loop3D method."
-            )
-            return
-
-        # Extract data from logged data
-        timestamps = [d["timestamp"] for d in self.control_data]
-
-        # Extract logged PID components
-        force_p_terms = np.array([d["force_p_term"] for d in self.control_data])
-        force_i_terms = np.array([d["force_i_term"] for d in self.control_data])
-        force_d_terms = np.array([d["force_d_term"] for d in self.control_data])
-
-        pos_p_terms = np.array([d["pos_p_term"] for d in self.control_data])
-        pos_i_terms = np.array([d["pos_i_term"] for d in self.control_data])
-        pos_d_terms = np.array([d["pos_d_term"] for d in self.control_data])
-
-        # Check if rotation PID data exists
-        has_rotation_data = "rot_p_term" in self.control_data[0]
-        if has_rotation_data:
-            rot_p_terms = np.array([d["rot_p_term"] for d in self.control_data])
-            rot_i_terms = np.array([d["rot_i_term"] for d in self.control_data])
-            rot_d_terms = np.array([d["rot_d_term"] for d in self.control_data])
-
-        # Setup plot
-        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-        # PID parameters (handle both scalar and vector PIDs)
-        if hasattr(self.force_pid, "kp") and np.isscalar(self.force_pid.kp):
-            force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
-        else:
-            force_pid_str = f"Kp={self.force_pid.kp}, Ki={self.force_pid.ki}, Kd={self.force_pid.kd}"
-
-        if hasattr(self.pose_pid, "kp") and np.isscalar(self.pose_pid.kp):
-            pose_pid_str = f"Kp={self.pose_pid.kp:.3f}, Ki={self.pose_pid.ki:.3f}, Kd={self.pose_pid.kd:.3f}"
-        else:
-            pose_pid_str = (
-                f"Kp={self.pose_pid.kp}, Ki={self.pose_pid.ki}, Kd={self.pose_pid.kd}"
-            )
-
-        # Get rotation PID string if available
-        rot_pid_str = ""
-        if has_rotation_data:
-            if hasattr(self, "rot_pid"):
-                pid_obj = self.rot_pid
-            elif hasattr(self, "rot_pid"):
-                pid_obj = self.rot_pid
-            else:
-                pid_obj = None
-
-            if pid_obj:
-                if hasattr(pid_obj, "kp") and np.isscalar(pid_obj.kp):
-                    rot_pid_str = (
-                        f"Kp={pid_obj.kp:.3f}, Ki={pid_obj.ki:.3f}, Kd={pid_obj.kd:.3f}"
-                    )
-                else:
-                    rot_pid_str = f"Kp={pid_obj.kp}, Ki={pid_obj.ki}, Kd={pid_obj.kd}"
-
-        # Create figure with appropriate size
-        fig_width = 30 if has_rotation_data else 20
-        plt.figure(figsize=(fig_width, 12))
-
-        # Main title
-        title_parts = [
-            f"PID Components Analysis ({current_datetime})",
-            f"Force PID: ({force_pid_str}), Pose PID: ({pose_pid_str})",
-        ]
-        if has_rotation_data:
-            title_parts.append(f"Rotation PID: ({rot_pid_str})")
-
-        plt.suptitle("\n".join(title_parts), fontsize=16, y=0.98)
-
-        colors = ["red", "green", "blue"]
-        axis_labels = ["X", "Y", "Z"]
-        n_cols = 4 if has_rotation_data else 3
-
-        # === COLUMN 1: Force PID Components ===
-
-        # 1. Force P Terms
-        plt.subplot(3, n_cols, 1)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                force_p_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Force PID - Proportional Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("P Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # 4. Force I Terms
-        plt.subplot(3, n_cols, n_cols + 1)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                force_i_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Force PID - Integral Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("I Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # 7. Force D Terms
-        plt.subplot(3, n_cols, 2 * n_cols + 1)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                force_d_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Force PID - Derivative Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("D Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # === COLUMN 2: Position PID Components ===
-
-        # 2. Position P Terms
-        plt.subplot(3, n_cols, 2)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                pos_p_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Position PID - Proportional Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("P Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # 5. Position I Terms
-        plt.subplot(3, n_cols, n_cols + 2)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                pos_i_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Position PID - Integral Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("I Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # 8. Position D Terms
-        plt.subplot(3, n_cols, 2 * n_cols + 2)
-        for axis in range(3):
-            plt.plot(
-                timestamps,
-                pos_d_terms[:, axis],
-                label=f"{axis_labels[axis]} Axis",
-                linewidth=2,
-                color=colors[axis],
-            )
-        plt.title("Position PID - Derivative Terms")
-        plt.xlabel("Time (s)")
-        plt.ylabel("D Term Output")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        # === COLUMN 3: Rotation PID Components (if available) ===
-        if has_rotation_data:
-            rot_axis_labels = ["Rx", "Ry", "Rz"]
-
-            # 3. Rotation P Terms
-            plt.subplot(3, n_cols, 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    rot_p_terms[:, axis],
-                    label=f"{rot_axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Rotation PID - Proportional Terms")
-            plt.xlabel("Time (s)")
-            plt.ylabel("P Term Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 6. Rotation I Terms
-            plt.subplot(3, n_cols, n_cols + 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    rot_i_terms[:, axis],
-                    label=f"{rot_axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Rotation PID - Integral Terms")
-            plt.xlabel("Time (s)")
-            plt.ylabel("I Term Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 9. Rotation D Terms
-            plt.subplot(3, n_cols, 2 * n_cols + 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    rot_d_terms[:, axis],
-                    label=f"{rot_axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Rotation PID - Derivative Terms")
-            plt.xlabel("Time (s)")
-            plt.ylabel("D Term Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # === COLUMN 4: Combined Terms ===
-            # Calculate combined terms including rotation
-            combined_p_terms = force_p_terms + pos_p_terms + rot_p_terms
-            combined_i_terms = force_i_terms + pos_i_terms + rot_i_terms
-            combined_d_terms = force_d_terms + pos_d_terms + rot_d_terms
-
-            # 4. Combined P Terms
-            plt.subplot(3, n_cols, 4)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_p_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined P Terms (Force + Position + Rotation)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined P Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 7. Combined I Terms
-            plt.subplot(3, n_cols, n_cols + 4)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_i_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined I Terms (Force + Position + Rotation)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined I Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 10. Combined D Terms
-            plt.subplot(3, n_cols, 2 * n_cols + 4)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_d_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined D Terms (Force + Position + Rotation)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined D Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        else:
-            # === COLUMN 3: Combined Terms (without rotation) ===
-            combined_p_terms = force_p_terms + pos_p_terms
-            combined_i_terms = force_i_terms + pos_i_terms
-            combined_d_terms = force_d_terms + pos_d_terms
-
-            # 3. Combined P Terms
-            plt.subplot(3, n_cols, 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_p_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined P Terms (Force + Position)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined P Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 6. Combined I Terms
-            plt.subplot(3, n_cols, n_cols + 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_i_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined I Terms (Force + Position)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined I Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-            # 9. Combined D Terms
-            plt.subplot(3, n_cols, 2 * n_cols + 3)
-            for axis in range(3):
-                plt.plot(
-                    timestamps,
-                    combined_d_terms[:, axis],
-                    label=f"{axis_labels[axis]} Axis",
-                    linewidth=2,
-                    color=colors[axis],
-                )
-            plt.title("Combined D Terms (Force + Position)")
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined D Output")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        # Save the plot
-        plot_type = "6dof" if has_rotation_data else "3dof"
-        filename = f"plots/pid_components_analysis_{plot_type}_{current_datetime}_{self.robot_id}.png"
-        os.makedirs("plots", exist_ok=True)
-        plt.savefig(filename, dpi=150, bbox_inches="tight")
-        plt.close()
-
-        print(f"PID plot saved: {filename}")
-
     def plot_data3D(self):
-        """Generate comprehensive plots for 6DOF control data including rotation tracking"""
+        """Generate comprehensive plots for 6DOF control data including rotation tracking + feedforward outputs"""
         if not self.control_data:
             print("No data to plot")
             return
@@ -934,6 +524,9 @@ class URForceController(URController):
         )
         position_output_vectors = np.array(
             [d["position_output_vector"] for d in self.control_data]
+        )
+        ff_position_output_vectors = np.array(  # <<< NEW
+            [d["ff_position_output_vector"] for d in self.control_data]
         )
         total_output_vectors = np.array(
             [d["total_output_vector"] for d in self.control_data]
@@ -985,6 +578,7 @@ class URForceController(URController):
         # Output magnitudes
         force_output_magnitudes = np.linalg.norm(force_output_vectors, axis=1)
         position_output_magnitudes = np.linalg.norm(position_output_vectors, axis=1)
+        ff_position_output_magnitudes = np.linalg.norm(ff_position_output_vectors, axis=1)  # <<< NEW
         total_output_magnitudes = np.linalg.norm(total_output_vectors, axis=1)
 
         if has_rotation_data:
@@ -1035,7 +629,6 @@ class URForceController(URController):
 
         # === ROW 1: Reference Tracking and Movement ===
 
-        # 1. Force vs Target Force (3D Components)
         plt.subplot(3, n_cols, 1)
         plt.plot(
             timestamps, force_vectors[:, 0], label="X Force", linewidth=2, color="red"
@@ -1367,6 +960,7 @@ class URForceController(URController):
         plt.legend()
         plt.grid(True, alpha=0.3)
 
+
         # === ROW 3: Control Outputs ===
 
         # Force Output Vectors (3D)
@@ -1407,43 +1001,77 @@ class URForceController(URController):
         plt.legend()
         plt.grid(True, alpha=0.3)
 
-        # Position Output Vectors (3D)
+        # Position Output Vectors (3D) + Feedforward
         plt.subplot(3, n_cols, 2 * n_cols + 2)
+        # PID outputs
         plt.plot(
             timestamps,
             position_output_vectors[:, 0],
-            label="Position Output X",
+            label="PID Out X",
             linewidth=2,
             color="red",
         )
         plt.plot(
             timestamps,
             position_output_vectors[:, 1],
-            label="Position Output Y",
+            label="PID Out Y",
             linewidth=2,
             color="green",
         )
         plt.plot(
             timestamps,
             position_output_vectors[:, 2],
-            label="Position Output Z",
+            label="PID Out Z",
             linewidth=2,
             color="blue",
         )
+
+        # Feedforward outputs (different bright colors)
+        plt.plot(
+            timestamps,
+            ff_position_output_vectors[:, 0],
+            label="FF Out X",
+            linewidth=2,
+            color="magenta",
+        )
+        plt.plot(
+            timestamps,
+            ff_position_output_vectors[:, 1],
+            label="FF Out Y",
+            linewidth=2,
+            color="orange",
+        )
+        plt.plot(
+            timestamps,
+            ff_position_output_vectors[:, 2],
+            label="FF Out Z",
+            linewidth=2,
+            color="cyan",
+        )
+
+        # Magnitudes
         plt.plot(
             timestamps,
             position_output_magnitudes,
-            label="Position Output Magnitude",
+            label="|PID Out|",
             linewidth=2,
             color="black",
-            linestyle="--",
         )
+        plt.plot(
+            timestamps,
+            ff_position_output_magnitudes,
+            label="|FF Out|",
+            linewidth=2,
+            color="purple",
+        )
+
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
-        plt.title("3D Position Control Outputs")
+        plt.title("3D Position Control Outputs (PID + Feedforward)")
         plt.xlabel("Time (s)")
         plt.ylabel("Position Output")
-        plt.legend()
+        plt.legend(ncol=2, fontsize=9)
         plt.grid(True, alpha=0.3)
+
 
         # Rotation Output Vectors (if available)
         if has_rotation_data:

@@ -1,29 +1,33 @@
-from control.ur_pid_controller import URForceController
+from control.ur_ff_controller import URForceController
 import numpy as np
 import time
 
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 75  # 150
+    reference_force = 80  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0013 * factor
+    kp_f = 0.0018 * factor
     ki_f = 0.0000 * factor
-    kd_f = 0.00005 * factor
+    kd_f = 0.0001 * factor
 
-    kp_p = 0.9  # 0.5
+    kp_p = 1.1  # 0.5
     ki_p = 0.00005
-    kd_p = 0.34  # 0.0025
+    kd_p = 0.08  # 0.0025
 
     kp_r = 0
     ki_r = 0
     kd_r = 0
 
-    alpha = 0.99
-    deadzone_threshold = 0.01
-    trajectory = "motion_planner/trajectories/lifting.npz"
+    Kp_p = 0.4
+    Ki_p = 0
+    Kd_p = 0.05
+
+    alpha = 0.85
+    deadzone_threshold = 0.02
+    trajectory = "motion_planner/trajectories/circle.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -37,6 +41,9 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
+        Kp_p=Kp_p,
+        Ki_p=Ki_p,
+        Kd_p=Kd_p,
     )
     robotR = URForceController(
         "192.168.1.66",
@@ -50,6 +57,9 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
+        Kp_p=Kp_p,
+        Ki_p=Ki_p,
+        Kd_p=Kd_p,
     )
 
     robotL.alpha = alpha
@@ -88,16 +98,16 @@ if __name__ == "__main__":
 
         robotR.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.5,
-            timeout=15,
+            distance_cap=1.5,
+            timeout=25,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
-            distance_cap=0.5,
-            timeout=15,
+            distance_cap=1.5,
+            timeout=25,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )

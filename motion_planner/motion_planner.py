@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib
 
-matplotlib.use("Qt5Agg")
+matplotlib.use("Agg")  # must be set BEFORE importing pyplot
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import json
@@ -509,6 +509,40 @@ class MotionPlanner:
     def __init__(self):
         pass
 
+    def hold(
+        self,
+        pose: np.ndarray,        # 4x4 homogenous pose to hold
+        duration: float,         # seconds to pause
+        dt: float,               # timestep
+        label: str = "hold"
+    ) -> "Trajectory":
+        """Generate a hold/pause trajectory at a fixed pose."""
+        position = pose[:3, 3]
+        rotation = pose[:3, :3]
+
+        params = {
+            "pose": pose.tolist(),
+            "duration": duration,
+            "dt": dt,
+        }
+        traj = Trajectory(label, params)
+
+        num_steps = max(1, int(round(duration / dt)))
+        t = 0.0
+        for i in range(num_steps + 1):
+            traj.add_waypoint(
+                position=position.copy(),
+                rotation=rotation.copy(),
+                linear_velocity=np.zeros(3),
+                angular_velocity=np.zeros(3),
+                linear_acceleration=np.zeros(3),
+                angular_acceleration=np.zeros(3),
+                index=i,
+                time=t,
+            )
+            t += dt
+        return traj
+
     def linear(
         self,
         start_pose: np.ndarray,
@@ -682,6 +716,191 @@ class MotionPlanner:
             )
 
         return trajectory
+    
+    def circular(
+        self,
+        start_pose: np.ndarray,
+        dt: float,
+        radius: float = None,
+        diameter: float = None,
+        max_velocity: float = None,      # along arc, m/s
+        max_acceleration: float = None,  # along arc, m/s^2
+        keep_orientation: bool = True,   # keep start orientation; if False, yaw-tangent
+        ccw: bool = True,                # CCW by default
+        label: str = "circular"
+    ) -> "Trajectory":
+        """
+        Generate a full 360° circular trajectory in the XY plane at start_pose.z.
+        Center is at start_position - [radius, 0, 0] (world X), so we begin on the circle at theta=0.
+        CCW means +theta over time.
+
+        Timing uses trapezoidal profile on arc-length 's' with v_max/a_max (like 'linear').
+        """
+
+        # Resolve radius
+        if radius is None and diameter is None:
+            raise ValueError("Provide either radius or diameter")
+        if radius is None:
+            radius = diameter * 0.5
+        if radius <= 0:
+            raise ValueError("radius must be > 0")
+
+        # Extract start position/orientation
+        p0 = start_pose[:3, 3].copy()
+        R0 = start_pose[:3, :3].copy()
+
+        # Circle center: start_pose - radius along world +X
+        center = p0.copy()
+        center[0] -= radius  # world-frame –x shift
+
+        # Geometry & travel
+        s_total = 2.0 * np.pi * radius  # arc length for 360°
+        if max_velocity and max_acceleration and max_velocity > 0 and max_acceleration > 0:
+            # Trapezoidal timing on arc length
+            t_accel = max_velocity / max_acceleration
+            s_accel = 0.5 * max_acceleration * t_accel**2
+
+            if s_total <= 2 * s_accel:
+                # Triangular
+                t_accel = np.sqrt(s_total / max_acceleration)
+                T = 2 * t_accel
+                v_peak = max_acceleration * t_accel
+            else:
+                s_const = s_total - 2 * s_accel
+                t_const = s_const / max_velocity
+                T = 2 * t_accel + t_const
+                v_peak = max_velocity
+        elif max_velocity and max_velocity > 0:
+            # Constant speed around the circle
+            T = s_total / max_velocity
+            v_peak = max_velocity
+            max_acceleration = None
+        else:
+            # Fallback: discretize by dt, keep a reasonable speed
+            # (match your 'linear' fallback style)
+            num_steps = max(1, int(s_total / dt / 1.0))  # ~1 m/s nominal
+            T = num_steps * dt
+            v_peak = s_total / T if T > 0 else 0
+
+        params = {
+            "type": "circle",
+            "center": center.tolist(),
+            "radius": radius,
+            "dt": dt,
+            "time": T,
+            "max_velocity": max_velocity,
+            "max_acceleration": max_acceleration,
+            "keep_orientation": keep_orientation,
+            "ccw": ccw,
+        }
+        traj = Trajectory(label, params)
+
+        num_steps = int(T / dt)
+        # Direction sign for CCW/CW
+        dir_sign = 1.0 if ccw else -1.0
+
+        # Helper to compute s, s_dot, s_ddot from trapezoid
+        def arc_profile(t: float):
+            if max_acceleration and v_peak and T:
+                t_acc = v_peak / max_acceleration
+                s_acc = 0.5 * max_acceleration * t_acc**2
+
+                if T <= 2 * t_acc + 1e-9:
+                    # Triangular
+                    t_acc = T * 0.5
+                    if t <= t_acc:
+                        s = 0.5 * max_acceleration * t**2
+                        s_dot = max_acceleration * t
+                        s_ddot = max_acceleration
+                    else:
+                        td = T - t
+                        s = s_total - 0.5 * max_acceleration * td**2
+                        s_dot = max_acceleration * td
+                        s_ddot = -max_acceleration
+                else:
+                    t_const = T - 2 * t_acc
+                    if t <= t_acc:
+                        s = 0.5 * max_acceleration * t**2
+                        s_dot = max_acceleration * t
+                        s_ddot = max_acceleration
+                    elif t <= t_acc + t_const:
+                        s = s_acc + v_peak * (t - t_acc)
+                        s_dot = v_peak
+                        s_ddot = 0.0
+                    else:
+                        td = T - t
+                        s = s_total - 0.5 * max_acceleration * td**2
+                        s_dot = max_acceleration * td
+                        s_ddot = -max_acceleration
+            else:
+                # Constant speed
+                s = (s_total / T) * t if T > 0 else 0.0
+                s_dot = s_total / T if T > 0 else 0.0
+                s_ddot = 0.0
+            return s, s_dot, s_ddot
+
+        # Generate waypoints
+        for i in range(num_steps + 1):
+            t = min(i * dt, T)
+            s, s_dot, s_ddot = arc_profile(t)
+
+            # Angle & its derivatives
+            theta = dir_sign * (s / radius)          # rad
+            theta_dot = dir_sign * (s_dot / radius)  # rad/s
+            theta_ddot = dir_sign * (s_ddot / radius)# rad/s^2
+
+            # Parametric circle (start at theta=0 at start point p0)
+            c, s_ = np.cos(theta), np.sin(theta)
+            x = center[0] + radius * (1.0 * c)   # starts at x = center_x + r = p0_x
+            y = center[1] + radius * (1.0 * s_)  # starts at y = center_y = p0_y
+            z = p0[2]                             # plane at start z
+
+            position = np.array([x, y, z])
+
+            # Linear velocity & acceleration in world (XY plane)
+            # r*[ -sin, cos ] * theta_dot ;  r*[ -cos, -sin ]*theta_dot^2 + r*[ -sin, cos ]*theta_ddot
+            vx = -radius * s_ * theta_dot
+            vy =  radius * c  * theta_dot
+            ax = -radius * c  * (theta_dot**2) - radius * s_ * theta_ddot
+            ay = -radius * s_ * (theta_dot**2) + radius * c  * theta_ddot
+
+            linear_velocity = np.array([vx, vy, 0.0])
+            linear_acceleration = np.array([ax, ay, 0.0])
+
+            # Orientation handling
+            if keep_orientation:
+                R = R0
+            else:
+                # Align yaw with tangent direction (tool x-axis along velocity)
+                # Tangent vector (vx, vy) -> yaw = atan2(vy, vx)
+                # If speed ~0 (at very start/end), fall back to initial yaw.
+                if np.hypot(vx, vy) > 1e-6:
+                    yaw = np.arctan2(vy, vx)
+                else:
+                    yaw = 0.0
+                # Build rotation = yaw about world Z times original roll/pitch (extract them from R0)
+                # Simple approach: take R0’s z-axis to keep tool’s z aligned with world z, rotate about z.
+                Rz = Rotation.from_euler("z", yaw).as_matrix()
+                # Keep roll/pitch from R0 by projecting its z-axis, or for simplicity just use Rz
+                # (If you want full roll/pitch preservation, replace this block with a decomposition.)
+                R = Rz @ np.eye(3)
+
+            # We don't command angular velocity/accel here; keep zero or compute if you align yaw.
+            angular_velocity = np.zeros(3)
+            angular_acceleration = np.zeros(3)
+
+            traj.add_waypoint(
+                position=position,
+                rotation=R,
+                linear_velocity=linear_velocity,
+                angular_velocity=angular_velocity,
+                linear_acceleration=linear_acceleration,
+                angular_acceleration=angular_acceleration,
+                index=i,
+                time=t,
+            )
+
+        return traj
 
     def concatenate_trajectories(self, trajectories: List[Trajectory]) -> Trajectory:
         """Concatenate multiple trajectories into one continuous trajectory"""
@@ -770,7 +989,21 @@ if __name__ == "__main__":
     pose6 = np.array(
         [
             [1, 0, 0, 0],
-            [0, 1, 0, 0.4],
+            [0, 1, 0, 0.25],
+            [0, 0, 1, 0.2],
+            [0, 0, 0, 1],
+        ]
+    )
+    pose7 = np.array(        [
+            [1, 0, 0, -0.25],
+            [0, 1, 0, 0.25],
+            [0, 0, 1, 0.2],
+            [0, 0, 0, 1],
+        ]
+    )
+    pose8 = np.array(        [
+            [1, 0, 0, -0.25],
+            [0, 1, 0, 0],
             [0, 0, 1, 0.2],
             [0, 0, 0, 1],
         ]
@@ -782,14 +1015,50 @@ if __name__ == "__main__":
     side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
     down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
     twist = planner.linear(pose2, pose5, dt, max_velocity=0.5, max_acceleration=0.25)
-    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.3, max_acceleration=0.25)
+    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.05, max_acceleration=0.1)
     side_y_back = planner.linear(
-        pose6, pose2, dt, max_velocity=0.3, max_acceleration=0.25
+        pose6, pose2, dt, max_velocity=0.05, max_acceleration=0.1
+    )
+    hold_side = planner.hold(pose6, 1.0, dt)
+    hold_middle = planner.hold(pose2, 1.0, dt)
+
+    hold_t = 0.5
+    hold_0 = planner.hold(pose2, hold_t, dt)
+    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.15, max_acceleration=0.15)
+    hold_1 = planner.hold(pose6, hold_t, dt)
+    side_x = planner.linear(pose6, pose7, dt, max_velocity=0.15, max_acceleration=0.15)
+    hold_2 = planner.hold(pose7, hold_t, dt)
+    side_y_b = planner.linear(pose7, pose8, dt, max_velocity=0.15, max_acceleration=0.15)
+    hold_3 = planner.hold(pose8, hold_t, dt)
+    side_x_b = planner.linear(pose8, pose2, dt, max_velocity=0.15, max_acceleration=0.15)
+    down = planner.linear(pose2, pose1, dt, max_velocity=0.15, max_acceleration=0.15)
+
+    
+    circle = planner.circular(
+        start_pose=pose2,
+        dt=dt,
+        radius=0.2,
+        max_velocity=0.25,        # m/s along arc
+        max_acceleration=0.15,    # m/s^2 along arc
+        keep_orientation=True,     # keep same tool orientation
+        ccw=True,
+        label="circle_xy_ccw"
     )
 
-    full_trajectory = planner.concatenate_trajectories([up, twist])
-    full_trajectory.plot_3d()
-    full_trajectory.plot_profiles()
-    plt.show()
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/pick_and_twist.npz")
+
+
+    # full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
+    # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
+    full_trajectory = planner.concatenate_trajectories([up, circle, down])
+    fig3d, _ = full_trajectory.plot_3d()
+    fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
+
+    fig_profiles = full_trajectory.plot_profiles()
+    fig_profiles.savefig("plots/trajectory_profiles.png", dpi=150, bbox_inches="tight")
+
+    # Ensure directory exists
+    import os
+    os.makedirs("plots", exist_ok=True)
+
+    full_trajectory.save_trajectory("motion_planner/trajectories/circle.npz")
