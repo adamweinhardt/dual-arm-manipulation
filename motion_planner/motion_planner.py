@@ -1038,8 +1038,8 @@ if __name__ == "__main__":
         start_pose=pose2,
         dt=dt,
         radius=0.2,
-        max_velocity=0.25,        # m/s along arc
-        max_acceleration=0.15,    # m/s^2 along arc
+        max_velocity=0.2,        # m/s along arc
+        max_acceleration=0.1,    # m/s^2 along arc
         keep_orientation=True,     # keep same tool orientation
         ccw=True,
         label="circle_xy_ccw"
