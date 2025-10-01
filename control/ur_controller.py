@@ -5,6 +5,8 @@ from numpy import pi
 import numpy as np
 import matplotlib.pyplot as plt
 import zmq
+import pinocchio as pin
+from pinocchio.urdf import buildModelFromUrdf
 
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
@@ -80,6 +82,10 @@ class URController(threading.Thread):
         self.alpha = 1
         self.data = []
         self.forces = []
+
+        #pinochio
+        self.model_pin = buildModelFromUrdf("/home/aweinhardt/Desktop/Thesis/dual-arm-manipulation/robot_ipc_control/ur_description/ur5.urdf")
+        self.data_pin = pin.Data(self.model_pin)
 
         # Start the control thread
         self.start()
@@ -376,3 +382,16 @@ class URController(threading.Thread):
         self.join(timeout=2)
         self.rtde_control.disconnect()
         self.rtde_receive.disconnect()
+
+    def get_joints(self):
+        return np.zeros(self.model_pin.nq)
+
+    def get_mass_matrix(self):
+        pin.crba(self.model_pin, self.data_pin, self.get_joints())
+        return self.rtde_control.getMassMatrix()
+    
+    def get_jacobian(self):
+        return self.rtde_control.getJacobian()
+    
+    def get_jacobian_derivative(self):
+        return self.rtde_control.getJacobianTimeDerivative()

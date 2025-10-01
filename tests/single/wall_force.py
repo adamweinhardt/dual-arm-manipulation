@@ -1,4 +1,4 @@
-from control.ur_pid_controller import URForceController
+from control.pid_controller import URForceController
 import numpy as np
 from numpy import pi
 
