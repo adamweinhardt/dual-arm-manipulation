@@ -1,6 +1,5 @@
 numpy
 matplotlib
-ur-rtde
 gtsam==4.2a7
 matplotlib==3.10.1
 matplotlib-inline==0.1.7
