@@ -42,7 +42,7 @@ python3 pose_estimation/robot_base_calibration.py --name left --robot_config_pat
 ### Pose estimation:
 
 ```python3
-python3 robot_ipc_control/pose_estimation/pose_estimator.py --config=robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json --detection_type=ransac_with_refinement
+python3 pose_estimation/pose_estimator.py --config=robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json --detection_type=ransac_with_refinement
 ```
 
 # Dual arm manipulation:
