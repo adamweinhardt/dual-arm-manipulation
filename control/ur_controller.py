@@ -6,7 +6,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import zmq
 import pinocchio as pin
-from pinocchio.urdf import buildModelFromUrdf
 
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
@@ -83,10 +82,12 @@ class URController(threading.Thread):
         self.data = []
         self.forces = []
 
-        #pinochio
-        self.model_pin = buildModelFromUrdf("/home/aweinhardt/Desktop/Thesis/dual-arm-manipulation/robot_ipc_control/ur_description/ur5.urdf")
-        self.data_pin = pin.Data(self.model_pin)
-
+        # self.fk = FastKinematics("robot_ipc_control/pose_estimation/ur5/ur5e.urdf",1,"tool0", False)
+        self.pin_model = pin.buildModelFromUrdf(
+            "ur5/ur5e.urdf"
+        )
+        self.pin_data = self.pin_model.createData()
+        self.pin_frame_id = self.pin_model.getFrameId("wrist_3_link")
         # Start the control thread
         self.start()
 
@@ -383,15 +384,33 @@ class URController(threading.Thread):
         self.rtde_control.disconnect()
         self.rtde_receive.disconnect()
 
-    def get_joints(self):
-        return np.zeros(self.model_pin.nq)
 
-    def get_mass_matrix(self):
-        pin.crba(self.model_pin, self.data_pin, self.get_joints())
-        return self.rtde_control.getMassMatrix()
-    
     def get_jacobian(self):
-        return self.rtde_control.getJacobian()
+        q = np.array(self.rtde_receive.getActualQ(), dtype=float)
+        v = np.array(self.rtde_receive.getActualQd(), dtype=float)  # joint velocities
+        pin.computeJointJacobians(self.pin_model, self.pin_data, q)
+        pin.updateFramePlacements(self.pin_model, self.pin_data)
+        J = pin.getFrameJacobian(
+            self.pin_model, self.pin_data, self.pin_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+        )
+        return np.asarray(J)
     
     def get_jacobian_derivative(self):
-        return self.rtde_control.getJacobianTimeDerivative()
+        q = np.array(self.rtde_receive.getActualQ(), dtype=float)
+        v = np.array(self.rtde_receive.getActualQd(), dtype=float)
+        pin.computeJointJacobians(self.pin_model, self.pin_data, q)
+        pin.updateFramePlacements(self.pin_model, self.pin_data)
+        pin.computeJointJacobiansTimeVariation(self.pin_model, self.pin_data, q, v)
+        dJ = pin.getFrameJacobianTimeVariation(
+            self.pin_model, self.pin_data, self.pin_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+        )
+        return np.asarray(dJ)
+
+    def get_mass_matrix(self):
+        q = np.array(self.rtde_receive.getActualQ(), dtype=float)
+        M = pin.crba(self.pin_model, self.pin_data, q)
+        M = (M + M.T) / 2.0  # enforce symmetry
+        return np.asarray(M)
+    
+    def get_Lambda(self):
+        return np.linalg.inv(self.J @ np.linalg.inv(self.M) @ self.J.T)
