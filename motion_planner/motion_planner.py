@@ -1014,7 +1014,7 @@ if __name__ == "__main__":
     up = planner.linear(pose1, pose2, dt, max_velocity=0.5, max_acceleration=0.25)
     side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
     down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
-    twist = planner.linear(pose2, pose5, dt, max_velocity=0.5, max_acceleration=0.25)
+    twist = planner.linear(pose2, pose5, dt, max_velocity=0.25, max_acceleration=0.1)
     side_y = planner.linear(pose2, pose6, dt, max_velocity=0.05, max_acceleration=0.1)
     side_y_back = planner.linear(
         pose6, pose2, dt, max_velocity=0.05, max_acceleration=0.1
@@ -1050,7 +1050,8 @@ if __name__ == "__main__":
 
     # full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
     # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
-    full_trajectory = planner.concatenate_trajectories([up, circle, down])
+    # full_trajectory = planner.concatenate_trajectories([up, circle, down]) #circle
+    full_trajectory = planner.concatenate_trajectories([up, twist]) #twist
     fig3d, _ = full_trajectory.plot_3d()
     fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
 
@@ -1061,4 +1062,4 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/circle.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/twist.npz")

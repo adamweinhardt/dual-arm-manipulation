@@ -483,6 +483,128 @@ class URForceController(URController):
         self.stop_control()
         super().disconnect
 
+    def plot_PID(self):
+        """
+        Plot Force PID, Pose PID, and Feed-Forward Pose PID (P/I/D) per axis over time,
+        plus summed P/I/D (Force + Pose + Feed-Forward). Saves to plots/ directory.
+
+        Layout (3 rows x 4 cols):
+        Row 1:  Force P   | Pose P    | FF Pose P | SUM P
+        Row 2:  Force I   | Pose I    | FF Pose I | SUM I
+        Row 3:  Force D   | Pose D    | FF Pose D | SUM D
+        """
+        if not self.control_data:
+            print("No data to plot")
+            return
+
+        # Check required keys exist in the log
+        required_force = {"force_p_term", "force_i_term", "force_d_term"}
+        required_pose  = {"pos_p_term", "pos_i_term", "pos_d_term"}
+        required_ff    = {"ff_pos_p_term", "ff_pos_i_term", "ff_pos_d_term"}
+
+        have_force = all(k in self.control_data[0] for k in required_force)
+        have_pose  = all(k in self.control_data[0] for k in required_pose)
+        have_ff    = all(k in self.control_data[0] for k in required_ff)
+
+        if not (have_force and have_pose and have_ff):
+            missing = []
+            if not have_force: missing.append("Force PID terms")
+            if not have_pose:  missing.append("Pose PID terms")
+            if not have_ff:    missing.append("Feed-Forward Pose PID terms")
+            print("PID components missing in control_data:", ", ".join(missing))
+            return
+
+        import numpy as np
+        import os, datetime
+        import matplotlib.pyplot as plt
+
+        # ---------- Extract ----------
+        T = np.array([d["timestamp"] for d in self.control_data])
+
+        force_p = np.array([d["force_p_term"] for d in self.control_data])  # (N,3)
+        force_i = np.array([d["force_i_term"] for d in self.control_data])
+        force_d = np.array([d["force_d_term"] for d in self.control_data])
+
+        pose_p  = np.array([d["pos_p_term"] for d in self.control_data])
+        pose_i  = np.array([d["pos_i_term"] for d in self.control_data])
+        pose_d  = np.array([d["pos_d_term"] for d in self.control_data])
+
+        ff_p    = np.array([d["ff_pos_p_term"] for d in self.control_data])
+        ff_i    = np.array([d["ff_pos_i_term"] for d in self.control_data])
+        ff_d    = np.array([d["ff_pos_d_term"] for d in self.control_data])
+
+        # ---------- Summed terms (Force + Pose + Feed-Forward) ----------
+        sum_p = force_p + pose_p + ff_p
+        sum_i = force_i + pose_i + ff_i
+        sum_d = force_d + pose_d + ff_d
+
+        # ---------- Pretty strings for gains ----------
+        def gains_str(pid_obj, label):
+            if pid_obj is None:
+                return f"{label}: (n/a)"
+            kp, ki, kd = pid_obj.kp, pid_obj.ki, pid_obj.kd
+            if np.isscalar(kp):
+                return f"{label}: (Kp={kp:.3f}, Ki={ki:.3f}, Kd={kd:.3f})"
+            return f"{label}: (Kp={kp}, Ki={ki}, Kd={kd})"
+
+        force_gains = gains_str(getattr(self, "force_pid", None), "Force PID")
+        pose_gains  = gains_str(getattr(self, "pose_pid", None),  "Pose PID")
+        ff_gains    = gains_str(getattr(self, "ff_pose_pid", None),"FF Pose PID")
+
+        # ---------- Plot ----------
+        colors = ["red", "green", "blue"]
+        axis_labels = ["X", "Y", "Z"]
+
+        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        fig = plt.figure(figsize=(28, 14))
+        plt.suptitle(
+            "PID Components (Force / Pose / Feed-Forward Pose) and Summed Terms\n"
+            f"{force_gains} | {pose_gains} | {ff_gains}\n"
+            f"Generated: {current_datetime}",
+            fontsize=16, y=0.98
+        )
+
+        def plot_block(row, col_offset, data, title):
+            """Plot a 3-axis time series block at (row, col), using shared colors."""
+            idx = (row - 1) * 4 + col_offset
+            plt.subplot(3, 4, idx)
+            for a in range(3):
+                plt.plot(T, data[:, a], label=f"{axis_labels[a]}", linewidth=2, color=colors[a])
+            plt.title(title)
+            plt.xlabel("Time (s)")
+            plt.ylabel("Output")
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
+            plt.legend()
+
+        # Row 1: P terms
+        plot_block(1, 1, force_p, "Force PID — P")
+        plot_block(1, 2, pose_p,  "Pose PID — P")
+        plot_block(1, 3, ff_p,    "FF Pose PID — P")
+        plot_block(1, 4, sum_p,   "SUM P = Force + Pose + FF")
+
+        # Row 2: I terms
+        plot_block(2, 1, force_i, "Force PID — I")
+        plot_block(2, 2, pose_i,  "Pose PID — I")
+        plot_block(2, 3, ff_i,    "FF Pose PID — I")
+        plot_block(2, 4, sum_i,   "SUM I = Force + Pose + FF")
+
+        # Row 3: D terms
+        plot_block(3, 1, force_d, "Force PID — D")
+        plot_block(3, 2, pose_d,  "Pose PID — D")
+        plot_block(3, 3, ff_d,    "FF Pose PID — D")
+        plot_block(3, 4, sum_d,   "SUM D = Force + Pose + FF")
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+
+        # Save
+        os.makedirs("plots", exist_ok=True)
+        robot_id = getattr(self, "robot_id", "x")
+        filename = f"plots/pid_force_pose_ff_terms_{current_datetime}_{robot_id}.png"
+        plt.savefig(filename, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"PID plot saved: {filename}")
+
     def plot_data3D(self):
         """Generate comprehensive plots for 6DOF control data including rotation tracking + feedforward outputs"""
         if not self.control_data:

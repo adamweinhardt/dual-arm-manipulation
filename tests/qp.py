@@ -38,15 +38,10 @@ if __name__ == "__main__":
 
         robotR.wait_for_commands()
         robotL.wait_for_commands()
-        robotR.wait_until_done()
-        robotL.wait_until_done()
 
+        optimizer.run()
 
-        robotR.wait_for_control()
-        robotL.wait_for_control()
-
-        robotR.plot_data3D()
-        robotL.plot_data3D()
+        optimizer.plot()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
