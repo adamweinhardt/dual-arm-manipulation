@@ -25,7 +25,7 @@ if __name__ == "__main__":
     Ki_p = 0
     Kd_p = 0.05
 
-    alpha = 0.9
+    alpha = 0.85
     deadzone_threshold = 0.02
     trajectory = "motion_planner/trajectories/side_y.npz"
 
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=40,
+            timeout=35,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=40,
+            timeout=35,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )

@@ -117,6 +117,8 @@ if __name__ == "__main__":
 
         robotR.plot_data3D()
         robotL.plot_data3D()
+        robotR.plot_PID()
+        robotL.plot_PID()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
