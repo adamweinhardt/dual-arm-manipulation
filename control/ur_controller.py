@@ -73,7 +73,7 @@ class URController(threading.Thread):
         self.default_speed = 1.0
         self.default_acceleration = 0.5
         self.default_joint_speed = 1.0
-        self.default_joint_acceleration = 1.4
+        self.default_joint_acceleration = 0.5
 
         # Data recording
         self.previous_force = None
