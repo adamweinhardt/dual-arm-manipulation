@@ -2,7 +2,7 @@ import numpy as np
 from control.impedance_qp_controller import URImpedanceController, JointOptimization
 
 if __name__ == "__main__":
-    K = np.diag([3000, 3000, 3000, 300, 300, 300])
+    K = np.diag([3000, 3000, 3000, 200, 200, 200])
 
     robotL = URImpedanceController(
         "192.168.1.33", K=K
@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
     # reference
     trajectory = "motion_planner/trajectories/lifting.npz"
-    Hz = 100
+    Hz = 60
 
     optimizer = JointOptimization(robotL, robotR, Hz, trajectory)
 
@@ -40,8 +40,8 @@ if __name__ == "__main__":
         robotL.wait_for_commands()
 
         optimizer.run()
-
-        optimizer.plot()
+        optimizer.plot_taskspace_tracking(("L","R"))
+        optimizer.plot_qp_and_jointspace(("L","R"))
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
