@@ -200,3 +200,38 @@ def end_effector_rotation_from_normal(normal_vector, eps=1e-9):
     if np.linalg.det(R) < 0.999999:
         raise ValueError("Rotation not right-handed (det != 1)")
     return R
+
+
+def _canonicalize_pair(pA, pB):
+    d = pB - pA
+    axis = int(np.argmax(np.abs(d)))  # 0=x, 1=y, 2=z (dominant separation)
+    if d[axis] < 0:  # enforce positive along dominant axis
+        pA, pB = pB, pA
+    return pA, pB
+
+def _compute_initial_box_frame(pA, pB):
+    # --- canonicalize ordering so both arms build the SAME frame ---
+    pA, pB = _canonicalize_pair(pA, pB)
+
+    x_hat = (pB - pA) / (np.linalg.norm(pB - pA) + 1e-9)
+
+    # project world-z onto plane orthogonal to x_hat; fallback if degenerate
+    z_guess = np.array([0, 0, 1])
+    z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
+    if np.linalg.norm(z_hat) < 1e-6:
+        z_guess = np.array([0, 1, 0])
+        z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
+    z_hat /= np.linalg.norm(z_hat) + 1e-9
+
+    y_hat = np.cross(z_hat, x_hat)
+    y_hat /= np.linalg.norm(y_hat) + 1e-9  # (tiny numeric guard)
+
+    R_WB0 = np.column_stack([x_hat, y_hat, z_hat])
+    p_WB0 = 0.5 * (pA + pB)
+    return R_WB0, p_WB0
+
+def _freeze_sparsity(A, eps=1e-12):
+    # Replace exact zeros with a tiny epsilon to keep nnz pattern constant.
+    A = np.asarray(A, dtype=float).copy()
+    A[A == 0.0] = eps
+    return A

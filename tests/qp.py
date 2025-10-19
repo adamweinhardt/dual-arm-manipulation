@@ -38,6 +38,10 @@ if __name__ == "__main__":
 
         robotR.wait_for_commands()
         robotL.wait_for_commands()
+        pL, _, _ = robotL.get_grasping_data()
+        pR, _, _ = robotR.get_grasping_data()
+        robotL.other_robot_grasp_point = np.array(pR)
+        robotR.other_robot_grasp_point = np.array(pL)
 
         optimizer.run()
         optimizer.plot_taskspace_tracking(("L","R"))
