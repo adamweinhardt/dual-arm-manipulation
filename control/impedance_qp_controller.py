@@ -34,8 +34,8 @@ class JointOptimization():
 
         # limits
         self.joint_pose_limit = np.deg2rad(360)   # ±360°
-        self.joint_speed_limit = np.deg2rad(90)   # ±90°/s
-        self.joint_accel_limit = np.deg2rad(40)   # ±45°/s²
+        self.joint_speed_limit = np.deg2rad(180)   # ±90°/s
+        self.joint_accel_limit = np.deg2rad(90)   # ±45°/s²
 
         self.control_data = []
         self.disable_rotation = True
@@ -59,42 +59,36 @@ class JointOptimization():
         # initial WORLD TCP poses
         state_L = self.robotL.get_state()
         state_R = self.robotR.get_state()
-        p_gripper_init_L = np.array(state_L["gripper_world"][:3])
-        p_gripper_init_R = np.array(state_R["gripper_world"][:3])
-        R_gripper_init_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
-        R_gripper_init_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
+        p_init_L = np.array(state_L["gripper_world"][:3])
+        p_init_R = np.array(state_R["gripper_world"][:3])
+        R_init_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
+        R_init_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
 
-        # shared box frame (PID-style)
-        R_world_box0, p_world_box0 = _compute_initial_box_frame(p_gripper_init_L, p_gripper_init_R)
-
-        # fixed grasp orientation in box frame
-        R_box_to_gripper_L = R_world_box0.T @ R_gripper_init_L
-        R_box_to_gripper_R = R_world_box0.T @ R_gripper_init_R
 
         # allocate WORLD references
-        self.position_ref_L          = np.zeros_like(p_box)
-        self.position_ref_R          = np.zeros_like(p_box)
-        self.velocity_ref_L          = np.zeros_like(v_box)
-        self.velocity_ref_R          = np.zeros_like(v_box)
-        self.rotation_ref_L          = np.zeros_like(R_box_ref)
-        self.rotation_ref_R          = np.zeros_like(R_box_ref)
-        self.angular_velocity_ref_L  = np.zeros_like(w_box)
-        self.angular_velocity_ref_R  = np.zeros_like(w_box)
+        self.position_ref_L         = np.zeros_like(p_box)
+        self.position_ref_R         = np.zeros_like(p_box)
+        self.velocity_ref_L         = np.zeros_like(v_box)
+        self.velocity_ref_R         = np.zeros_like(v_box)
+        self.rotation_ref_L         = np.zeros((self.traj_len,3,3))
+        self.rotation_ref_R         = np.zeros((self.traj_len,3,3))
+        self.angular_velocity_ref_L = np.zeros_like(w_box)
+        self.angular_velocity_ref_R = np.zeros_like(w_box)
 
         for t in range(self.traj_len):
             # linear: world = R_world_box0 * box + init_offset
-            self.position_ref_L[t] = p_gripper_init_L + R_world_box0 @ p_box[t]
-            self.position_ref_R[t] = p_gripper_init_R + R_world_box0 @ p_box[t]
-            self.velocity_ref_L[t] = R_world_box0 @ v_box[t]
-            self.velocity_ref_R[t] = R_world_box0 @ v_box[t]
+            self.position_ref_L[t] = p_init_L + p_box[t]
+            self.position_ref_R[t] = p_init_R +  p_box[t]
+            self.velocity_ref_L[t] = v_box[t]
+            self.velocity_ref_R[t] = v_box[t]
 
             # orientation: R_world_gripper_ref = R_world_box0 * R_box_ref * R_box_to_gripper
-            self.rotation_ref_L[t] = R_world_box0 @ R_box_ref[t] @ R_box_to_gripper_L
-            self.rotation_ref_R[t] = R_world_box0 @ R_box_ref[t] @ R_box_to_gripper_R
+            self.rotation_ref_L[t] = R_box_ref[t] @ R_init_L
+            self.rotation_ref_R[t] = R_box_ref[t] @ R_init_R
 
             # angular velocity to world
-            self.angular_velocity_ref_L[t] = R_world_box0 @ w_box[t]
-            self.angular_velocity_ref_R[t] = R_world_box0 @ w_box[t]
+            self.angular_velocity_ref_L[t] =  w_box[t]
+            self.angular_velocity_ref_R[t] =  w_box[t]
 
     # ------------------------ QP build ------------------------
     def build_qp(self, dt):
@@ -147,14 +141,19 @@ class JointOptimization():
             -q_acc_lim <= self.qddot_L_var, self.qddot_L_var <= q_acc_lim,
             -q_acc_lim <= self.qddot_R_var, self.qddot_R_var <= q_acc_lim,
         ]
+        if self.disable_rotation:
+            cons += [ xddot_L[3:6] == 0 ]
+            cons += [ xddot_R[3:6] == 0 ]
+
+
 
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         self.qp_kwargs = dict(
-            eps_abs=3e-5,
-            eps_rel=3e-5,
-            max_iter=2000,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
+            max_iter=20000,
             adaptive_rho=True,
-            adaptive_rho_interval=25,
+            adaptive_rho_interval=45,
             polish=False,
             check_termination=10,
             warm_start=True,
@@ -297,25 +296,7 @@ class JointOptimization():
 
                 # diagnostics
                 if i % 50 == 0:
-                    twist_meas_L = np.r_[v_L, w_L]
-                    twist_pred_L = J_L @ qdot_L
-                    s_L = float(np.dot(twist_pred_L[:3], twist_meas_L[:3]))  # linear part alignment
-                    nL = np.linalg.norm(twist_pred_L[:3]) * np.linalg.norm(twist_meas_L[:3]) + 1e-12
-                    cosL = s_L / nL
-                    print(f"[L] cos(angle) between J qdot and measured (linear) = {cosL:+.3f}  (want close to +1)")
-
-                    twist_meas_R = np.r_[v_R, w_R]
-                    twist_pred_R = J_R @ qdot_R
-                    s_R = float(np.dot(twist_pred_R[:3], twist_meas_R[:3]))
-                    nR = np.linalg.norm(twist_pred_R[:3]) * np.linalg.norm(twist_meas_R[:3]) + 1e-12
-                    cosR = s_R / nR
-                    print(f"[R] cos(angle) between J qdot and measured (linear) = {cosR:+.3f}")
-
-                    # Per-axis quick sign check (linear rows only)
-                    print("[L] sign(pred) vs sign(meas) (xyz):",
-                        np.sign(twist_pred_L[:3]).astype(int), np.sign(twist_meas_L[:3]).astype(int))
-                    print("[R] sign(pred) vs sign(meas) (xyz):",
-                        np.sign(twist_pred_R[:3]).astype(int), np.sign(twist_meas_R[:3]).astype(int))
+                    pass
 
                 # integrate solver outputs (for plotting & feed)
                 qdot_L_cmd = qdot_L + qddot_L_sol * dt
@@ -646,7 +627,7 @@ class URImpedanceController(URForceController):
         J = pin.getFrameJacobian(
             self.pin_model, self.pin_data, self.pin_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
-        return np.asarray(J)
+        return self.get_J_world(J)
 
     def get_Jdot(self, q, v):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
@@ -655,7 +636,7 @@ class URImpedanceController(URForceController):
         dJ = pin.getFrameJacobianTimeVariation(
             self.pin_model, self.pin_data, self.pin_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
-        return np.asarray(dJ)
+        return self.get_J_world(dJ)
 
     def get_M(self, q):
         M = pin.crba(self.pin_model, self.pin_data, q)
