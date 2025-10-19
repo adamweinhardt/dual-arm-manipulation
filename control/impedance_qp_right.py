@@ -104,6 +104,13 @@ class JointOptimizationSingleArm():
             -q_acc_lim <= self.qddot_var, self.qddot_var <= q_acc_lim,
         ]
 
+        if self.disable_rotation:
+            # Enforce zero angular task acceleration (rows 3:6 are angular)
+            cons += [
+                xddot[3:6] == 0
+            ]
+
+
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         self.qp_kwargs = dict(
             eps_abs=1e-6,
@@ -529,7 +536,7 @@ if __name__ == "__main__":
 
     # ---- RIGHT robot only ----
     robotR = URImpedanceController(
-        "192.168.1.66", K=K
+        "192.168.1.33", K=K
     )
 
     # Trajectory (BOX frame); adjust path if needed
