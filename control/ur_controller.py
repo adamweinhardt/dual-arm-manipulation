@@ -56,7 +56,14 @@ class URController(threading.Thread):
         self.context = zmq.Context()
         self.publisher = self.context.socket(zmq.PUB)
         self.publisher.bind(f"tcp://127.0.0.1:{self.port}")
-        # self._start_publishing()
+        
+        self.T_r2w = self.robot_config #4x4 hom transform
+        self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float) #rotation 3x3
+        self.R_r2w = self.R_r2w @ np.array([[-1, 0, 0],
+                                            [ 0,-1, 0],
+                                            [ 0, 0, 1]])
+        self.t_r2w = self.T_r2w[:3, 3] # +  np.array([0.00, -0.05753, -0.10]) #offset from tcp to my gripper. 3x1
+
 
         # Defaults
         self.home_joints = [
@@ -285,6 +292,13 @@ class URController(threading.Thread):
 
         except Exception as e:
             print(f"ERROR in speedL_world: {e}")
+
+    def get_J_world(self, J):
+        """Rotate Jacobian from robot-base to world frame."""
+        J_world = np.zeros_like(J)
+        J_world[:3, :] = self.R_r2w @ J[:3, :]
+        J_world[3:, :] = self.R_r2w @ J[3:, :]
+        return J_world
 
     def speedStop(self):
         command = lambda: self.rtde_control.speedStop()
