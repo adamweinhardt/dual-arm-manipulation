@@ -2,7 +2,7 @@ import numpy as np
 from control.impedance_qp_controller import URImpedanceController, JointOptimization
 
 if __name__ == "__main__":
-    K = np.diag([1500, 1500, 1500, 100, 100, 100])
+    K = np.diag([15000, 15000, 15000, 5000, 5000, 5000])
 
     robotL = URImpedanceController(
         "192.168.1.33", K=K
@@ -12,8 +12,8 @@ if __name__ == "__main__":
     )
 
     # reference
-    trajectory = "motion_planner/trajectories/lifting.npz"
-    Hz = 70
+    trajectory = "motion_planner/trajectories/lift_50.npz"
+    Hz = 60
 
     optimizer = JointOptimization(robotL, robotR, Hz, trajectory)
 

@@ -85,7 +85,7 @@ class JointOptimizationSingleArm():
         xddot = self.J_p @ self.qddot_var + self.Jdot_p @ self.qdot_p
         e = xddot - self.a_p
         if self.disable_rotation:
-            W6 = cp.Constant(np.diag([1, 1, 1, 0, 0, 0]))
+            W6 = cp.Constant(np.diag([1, 1, 1, 1, 1, 1]))
             obj = cp.sum_squares(W6 @ e)
         else:
             obj = cp.sum_squares(e)
@@ -104,24 +104,45 @@ class JointOptimizationSingleArm():
             -q_acc_lim <= self.qddot_var, self.qddot_var <= q_acc_lim,
         ]
 
-        if self.disable_rotation:
-            # Enforce zero angular task acceleration (rows 3:6 are angular)
-            cons += [
-                xddot[3:6] == 0
-            ]
+        # if self.disable_rotation:
+        #     # Enforce zero angular task acceleration (rows 3:6 are angular)
+        #     cons += [
+        #         xddot[3:6] == 0
+        #     ]
 
 
         self.qp = cp.Problem(cp.Minimize(obj), cons)
+        # self.qp_kwargs = dict(
+        #     # iteration / time limits
+        #     max_iter=3000,            # like OSQP's max_iter
+        #     time_limit=float("inf"),  # no time cap
+
+        #     # tolerances (Clarabel uses gap/feas tolerances)
+        #     tol_gap_abs=1e-4,         # ~ eps_abs
+        #     tol_gap_rel=1e-4,         # ~ eps_rel
+        #     tol_feas=1e-5,            # feasibility tol (primal/dual)
+        #     tol_infeas_abs=1e-6,      # absolute infeasibility tol
+
+        #     # numeric pre-scaling (stable defaults; keep on)
+        #     equilibrate_enable=True,
+        #     equilibrate_max_iter=10,
+
+        #     # linear solver / regularization (safe defaults)
+        #     static_regularization_enable=True,
+        #     # logging
+        #     verbose=False,
+        # )
         self.qp_kwargs = dict(
-            eps_abs=1e-6,
-            eps_rel=1e-6,
-            max_iter=16000,
+            eps_abs=1e-4,
+            eps_rel=1e-4,
+            max_iter=3000,
             adaptive_rho=True,
             adaptive_rho_interval=40,
             polish=False,
             check_termination=10,
             warm_start=True,
         )
+
 
     # ------------------------ control loop ------------------------
     def run(self):
@@ -175,17 +196,18 @@ class JointOptimizationSingleArm():
                 e_r = RR.from_matrix(e_R).as_rotvec()
 
                 if self.disable_rotation:
+                    #e_w[:] = 0.0
                     e_r[:] = 0.0
-                    e_w[:] = 0.0
-                    D[3:, :] = 0.0
-                    D[:, 3:] = 0.0
+                    #D[3:, :] = 0.0
+                    #D[:, 3:] = 0.0
 
                 f = self.robot.get_wrench_desired(D, self.robot.K, e_p, e_r, e_v, e_w)
 
                 # desired task accelerations (WORLD) for QP
                 a = np.linalg.solve(Lambda, f)
                 if self.disable_rotation:
-                    a[3:] = 0.0
+                    #a[3:] = 0.0
+                    pass
 
                 # set Parameters (freeze sparsity)
                 self.J_p.value    = _freeze_sparsity(J)
@@ -196,18 +218,14 @@ class JointOptimizationSingleArm():
 
                 # solve QP
                 _solve_t0 = time.perf_counter()
-                try:
-                    self.qp.solve(solver=cp.OSQP, **self.qp_kwargs)
-                except Exception:
-                    self.qp.status = "error"
+
+                self.qp.solve(solver=cp.OSQP, **self.qp_kwargs)
+
                 _solve_dt = time.perf_counter() - _solve_t0
                 self._win_solver_time += _solve_dt
                 self._total_solver_time += _solve_dt
 
-                if self.qp.status not in ("optimal", "optimal_inaccurate"):
-                    qddot_sol = np.zeros_like(q)
-                else:
-                    qddot_sol = np.asarray(self.qddot_var.value).reshape(-1)
+                qddot_sol = np.asarray(self.qddot_var.value).reshape(-1)
 
                 # diagnostics
                 if i % 50 == 0:
@@ -531,8 +549,7 @@ class URImpedanceController(URForceController):
         return wrench
 
 if __name__ == "__main__":
-    # Impedance gains (same pattern you used)
-    K = np.diag([1500, 1500, 1500, 100, 100, 100])
+    K = np.diag([100, 100, 100, 50, 50, 50])
 
     # ---- RIGHT robot only ----
     robotR = URImpedanceController(
@@ -540,8 +557,8 @@ if __name__ == "__main__":
     )
 
     # Trajectory (BOX frame); adjust path if needed
-    trajectory = "motion_planner/trajectories/lifting.npz"
-    Hz = 70
+    trajectory = "motion_planner/trajectories/lift_50.npz"
+    Hz = 60
 
     # Create right-arm optimizer; start with rotation disabled to simplify debugging
     optimizer = JointOptimizationSingleArm(
@@ -552,10 +569,6 @@ if __name__ == "__main__":
 
     try:
         # --- Bring the right arm to a known state (adapt these to your setup) ---
-        robotR.go_home()
-        robotR.wait_for_commands()
-        robotR.wait_until_done()
-
         robotR.go_to_approach()
         robotR.wait_for_commands()
         robotR.wait_until_done()
