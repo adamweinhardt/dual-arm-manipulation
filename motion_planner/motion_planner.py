@@ -1017,7 +1017,7 @@ if __name__ == "__main__":
         ]
     )
 
-    hz = 50
+    hz = 100
     dt = 1 / hz
     up = planner.linear(pose1, pose2, dt, max_velocity=0.5, max_acceleration=0.25)
     UP = planner.linear(pose1, pose9, dt, max_velocity=0.25, max_acceleration=0.1)
@@ -1073,4 +1073,4 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/lift_50.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/lift_100.npz")
