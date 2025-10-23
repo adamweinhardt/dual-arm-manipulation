@@ -47,8 +47,10 @@ class JointOptimizationSingleArm():
         """
         # trajectory
         self.traj_len = self.trajectory_npz['position'].shape[0]
-        p_deltas  = self.trajectory_npz['position']            # (T,3), treated as WORLD deltas
-        v_world   = self.trajectory_npz['linear_velocity']     # (T,3), WORLD linear v
+        p_box  = self.trajectory_npz['position']            # (T,3), treated as WORLD deltas
+        v_box   = self.trajectory_npz['linear_velocity']     # (T,3), WORLD linear v
+        R_box  = self.trajectory_npz['rotation_matrices']   # (T,3,3)
+        w_box  = self.trajectory_npz['angular_velocity']
 
         # initial WORLD TCP pose/orientation
         state = self.robot.get_state()
@@ -56,15 +58,16 @@ class JointOptimizationSingleArm():
         R_gripper_init = RR.from_rotvec(state["pose"][3:6]).as_matrix()
 
         # allocate WORLD references
-        self.position_ref         = np.zeros_like(p_deltas)
-        self.velocity_ref         = np.zeros_like(v_world)
+        self.position_ref         = np.zeros_like(p_box)
+        self.velocity_ref         = np.zeros_like(v_box)
         self.rotation_ref         = np.zeros((self.traj_len, 3, 3))
-        self.angular_velocity_ref = np.zeros_like(p_deltas)  # zeros; rotation disabled anyway
+        self.angular_velocity_ref = np.zeros_like(w_box)  # zeros; rotation disabled anyway
 
         for t in range(self.traj_len):
-            self.position_ref[t] = p_gripper_init + p_deltas[t]
-            self.velocity_ref[t] = v_world[t]
-            self.rotation_ref[t] = R_gripper_init  # keep constant
+            self.position_ref[t] = p_gripper_init + p_box[t]
+            self.velocity_ref[t] = v_box[t]
+            self.rotation_ref[t] = R_gripper_init #R_box[t]
+            self.angular_velocity_ref[t] = w_box[t]
 
     # ------------------------ QP build ------------------------
     def build_qp(self, dt):
@@ -84,11 +87,12 @@ class JointOptimizationSingleArm():
         # objective: accel tracking
         xddot = self.J_p @ self.qddot_var + self.Jdot_p @ self.qdot_p
         e = xddot - self.a_p
-        if self.disable_rotation:
-            W6 = cp.Constant(np.diag([1, 1, 1, 1, 1, 1]))
-            obj = cp.sum_squares(W6 @ e)
-        else:
-            obj = cp.sum_squares(e)
+
+        w_t = 1.5
+        w_r = 0.025
+        W = cp.diag([w_t, w_t, w_t, w_r, w_r, w_r])
+        obj  = cp.sum_squares(W @ e)
+        obj += 3e-4 * cp.sum_squares(self.qddot_var)
 
         # joint constraints
         q_pos_lim = self.joint_pose_limit
@@ -103,13 +107,6 @@ class JointOptimizationSingleArm():
             -q_vel_lim <= qdot_next, qdot_next <= q_vel_lim,
             -q_acc_lim <= self.qddot_var, self.qddot_var <= q_acc_lim,
         ]
-
-        # if self.disable_rotation:
-        #     # Enforce zero angular task acceleration (rows 3:6 are angular)
-        #     cons += [
-        #         xddot[3:6] == 0
-        #     ]
-
 
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         # self.qp_kwargs = dict(
@@ -133,12 +130,13 @@ class JointOptimizationSingleArm():
         #     verbose=False,
         # )
         self.qp_kwargs = dict(
-            eps_abs=1e-4,
-            eps_rel=1e-4,
-            max_iter=3000,
+            eps_abs=1e-5,
+            eps_rel=1e-5,
+            alpha=1.6,
+            max_iter=5000,
             adaptive_rho=True,
-            adaptive_rho_interval=40,
-            polish=False,
+            adaptive_rho_interval=20,
+            polish=True,
             check_termination=10,
             warm_start=True,
         )
@@ -192,22 +190,16 @@ class JointOptimizationSingleArm():
                 e_p = p_ref - p
                 e_v = v_ref - v
                 e_w = w_ref - w
+                # rotation error:  -(log(R^T R_ref))^vee
+                # original: R_ref @ R.T
                 e_R = R_ref @ R.T
-                e_r = RR.from_matrix(e_R).as_rotvec()
+                e_r = pin.log3(e_R)
 
-                if self.disable_rotation:
-                    #e_w[:] = 0.0
-                    e_r[:] = 0.0
-                    #D[3:, :] = 0.0
-                    #D[:, 3:] = 0.0
 
                 f = self.robot.get_wrench_desired(D, self.robot.K, e_p, e_r, e_v, e_w)
 
                 # desired task accelerations (WORLD) for QP
                 a = np.linalg.solve(Lambda, f)
-                if self.disable_rotation:
-                    #a[3:] = 0.0
-                    pass
 
                 # set Parameters (freeze sparsity)
                 self.J_p.value    = _freeze_sparsity(J)
@@ -549,7 +541,7 @@ class URImpedanceController(URForceController):
         return wrench
 
 if __name__ == "__main__":
-    K = np.diag([100, 100, 100, 50, 50, 50])
+    K = np.diag([120, 120, 120, 18, 18, 18])
 
     # ---- RIGHT robot only ----
     robotR = URImpedanceController(
@@ -557,8 +549,8 @@ if __name__ == "__main__":
     )
 
     # Trajectory (BOX frame); adjust path if needed
-    trajectory = "motion_planner/trajectories/lift_50.npz"
-    Hz = 60
+    trajectory = "motion_planner/trajectories/lift_100.npz"
+    Hz = 100
 
     # Create right-arm optimizer; start with rotation disabled to simplify debugging
     optimizer = JointOptimizationSingleArm(
