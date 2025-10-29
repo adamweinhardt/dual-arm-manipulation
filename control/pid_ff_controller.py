@@ -373,11 +373,20 @@ class URForceController(URController):
                 position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
                     self.pose_pid.update(position_error_vector)
                 )
+                # DEADZONE
                 if self.deadzone_threshold is not None:
+                    r = float(self.deadzone_threshold)
+                    shaped_err = np.zeros(3)
+
+                    # --- Smooth deadzone using offset method ---
                     for i in range(3):
-                        if abs(position_error_vector[i]) <= self.deadzone_threshold:
-                            position_output_vector[i] = 0.0
-                            pos_p_term[i] = pos_i_term[i] = pos_d_term[i] = 0.0
+                        e = position_error_vector[i]
+                        if abs(e) <= r:
+                            shaped_err[i] = 0.0
+                        elif e > 0:
+                            shaped_err[i] = e - r
+                        else:
+                            shaped_err[i] = e + r
 
                 # feedforward position
                 ff_position_output_vector, ff_pos_p_term, ff_pos_i_term, ff_pos_d_term = (
