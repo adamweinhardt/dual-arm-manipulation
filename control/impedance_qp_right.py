@@ -67,7 +67,7 @@ class JointOptimizationSingleArm():
         for t in range(self.traj_len):
             self.position_ref[t]         = p_gripper_init + p_box[t]
             self.velocity_ref[t]         = v_box[t]
-            self.rotation_ref[t]         = R_gripper_init  # lock orientation
+            self.rotation_ref[t]         = R_gripper_init @ R_box[t]# lock orientation
             self.angular_velocity_ref[t] = w_box[t]
 
     # ------------------------ QP build ------------------------
@@ -109,8 +109,8 @@ class JointOptimizationSingleArm():
         scale_rot = 4    # ~1/(0.2 rad/s^2)
 
         w_lin = 1e5
-        w_rot = 4e-6
-        self.lambda_reg = 1e-6
+        w_rot = 1e3
+        self.lambda_reg = 1e-7
 
         # stash for plotting/debug/metadata
         self.scale_lin = scale_lin
@@ -772,7 +772,7 @@ class URImpedanceController(URForceController):
 
 if __name__ == "__main__":
     # impedance gains: lower last 3 if orientation is too aggressive
-    K = np.diag([400, 400, 400, 2, 2, 1])
+    K = np.diag([400, 400, 400, 1, 1, 1])
 
     robotR = URImpedanceController(
         "192.168.1.33",
@@ -780,7 +780,7 @@ if __name__ == "__main__":
     )
 
     trajectory = "motion_planner/trajectories/lift_100.npz"
-    Hz = 90
+    Hz = 70
 
     optimizer = JointOptimizationSingleArm(
         robot=robotR,
