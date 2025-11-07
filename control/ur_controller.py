@@ -100,11 +100,6 @@ class URController(threading.Thread):
             try:
                 command = self.command_queue.get(timeout=0.1)
 
-                # recording_thread = threading.Thread(
-                #     target=self._record_during_movement, daemon=True
-                # )
-                # recording_thread.start()
-
                 command()
 
                 self.command_queue.task_done()

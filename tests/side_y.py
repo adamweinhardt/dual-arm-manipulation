@@ -5,13 +5,13 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 80  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0018 * factor
+    kp_f = 0.025 * factor
     ki_f = 0.0000 * factor
-    kd_f = 0.0001 * factor
+    kd_f = 0.005 * factor
 
     kp_p = 1.1  # 0.5
     ki_p = 0.00005
@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     alpha = 0.85
     deadzone_threshold = 0.02
-    trajectory = "motion_planner/trajectories/side_y.npz"
+    trajectory = "motion_planner/trajectories/side_y_fast.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=35,
+            timeout=22,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=35,
+            timeout=22,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )

@@ -10,7 +10,28 @@ import datetime
 import os
 
 from control.pid_ff_controller import URForceController
-from utils.utils import _freeze_sparsity
+from utils.utils import _freeze_sparsity, _as_rowvec_1d, _as_2d
+
+def skew(v):
+    x, y, z = v
+    return np.array([[0, -z, y],
+                     [z, 0, -x],
+                     [-y, x, 0]], dtype=float)
+
+def vee(S):
+    # inverse of skew
+    return np.array([S[2,1] - S[1,2], S[0,2] - S[2,0], S[1,0] - S[0,1]], dtype=float) * 0.5
+
+def w_fd_world_via_diff(R_next, R, dt):
+    # R is world<-body; with ω_world we have: Rdot = [ω_world]_x R  ⇒ ω_world ≈ vee( (R_next - R)/dt @ R^T )
+    Rdot = (R_next - R) / dt
+    return vee(Rdot @ R.T)
+
+def w_fd_world_via_log(R_next, R, dt):
+    # ΔR = R_next R^T. log(ΔR) gives body-frame small rotation δθ_body; convert to world by R_next * δθ_body/dt
+    dR = R_next @ R.T
+    dtheta_body = pin.log3(dR)          # rotation vector in body coords over the interval
+    return (R_next @ dtheta_body) / dt  # express as world angular velocity
 
 
 class JointOptimizationSingleArm():
@@ -109,8 +130,8 @@ class JointOptimizationSingleArm():
         scale_rot = 4    # ~1/(0.2 rad/s^2)
 
         w_lin = 1e5
-        w_rot = 1e3
-        self.lambda_reg = 1e-7
+        w_rot = 4e3
+        self.lambda_reg = 1e-8
 
         # stash for plotting/debug/metadata
         self.scale_lin = scale_lin
@@ -162,10 +183,10 @@ class JointOptimizationSingleArm():
 
         # solver settings (OSQP)
         self.qp_kwargs = dict(
-            eps_abs=1e-6,
-            eps_rel=1e-6,
+            eps_abs=3e-6,
+            eps_rel=3e-6,
             alpha=1.6,
-            max_iter=5000,
+            max_iter=10000,
             adaptive_rho=True,
             adaptive_rho_interval=20,
             polish=True,
@@ -208,6 +229,7 @@ class JointOptimizationSingleArm():
                 r = np.array(state["pose"][3:6])  # rotvec
                 R = RR.from_rotvec(r).as_matrix()
                 w = np.array(state["speed_world"][3:6])
+                #w = np.array([0,0,0])
 
                 q    = self.robot.get_q()
                 qdot = self.robot.get_qdot()
@@ -229,6 +251,111 @@ class JointOptimizationSingleArm():
                 f = self.robot.get_wrench_desired(D, self.robot.K, e_p, e_r, e_v, e_w)
                 a = np.linalg.solve(Lambda, f)  # desired task-space accel (6,)
 
+                if i % 50 == 0:
+                    try:
+                        # --- Frames & angular velocity sanity ---
+                        # Right-invariant vs left-invariant orientation errors
+                        R_err_right = R.T @ R_ref        # common choice
+                        R_err_left  = R_ref @ R.T        # your current choice
+                        r_right = pin.log3(R_err_right)
+                        r_left  = pin.log3(R_err_left)
+                        ang_right = np.linalg.norm(r_right)
+                        ang_left  = np.linalg.norm(r_left)
+
+                        # Finite-diff angular velocity (world-frame), two ways:
+                        # 1) direct rotvec diff (/dt)
+                        if 'r_prev' not in locals():
+                            r_prev = r
+                            R_prev = R
+                        w_fd1 = (r - r_prev) / max(dt, 1e-6)
+
+                        # 2) log-map of relative rotation, mapped to world
+                        R_rel = R_prev.T @ R
+                        r_rel = pin.log3(R_rel) / max(dt, 1e-6)  # local (prev body)
+                        # map to world using current R (LOCAL_WORLD_ALIGNED Jacobian uses world axes)
+                        w_fd2 = R @ r_rel
+
+                        # Jacobian-predicted twist
+                        xdot_pred = J @ qdot
+                        v_pred, w_pred = xdot_pred[:3], xdot_pred[3:]
+
+                        w_meas = np.array(state["speed_world"][3:])
+
+                        # --- Objective recompute (safety) ---
+                        W_diag = self.W_task_vec_c.value
+                        obj_task_chk = float(np.sum((W_diag * e_acc_p)**2))
+                        obj_reg_chk  = float(self.lambda_reg) * float(qddot_sol @ qddot_sol)
+                        obj_tot_chk  = obj_task_chk + obj_reg_chk
+
+                        # Split terms
+                        trans_err = e_acc_p[:3]; rot_err = e_acc_p[3:]
+                        obj_trans_chk = float(np.sum((W_diag[:3] * trans_err)**2))
+                        obj_rot_chk   = float(np.sum((W_diag[3:] * rot_err)**2))
+
+                        # --- Conditioning of operational space ---
+                        # A = J M^{-1} J^T
+                        Minv = np.linalg.inv(M)
+                        A = J @ Minv @ J.T
+                        A = 0.5 * (A + A.T)
+                        # eigen-stuff & condition
+                        ew = np.linalg.eigvalsh(A)
+                        lam_min = float(np.max([np.min(ew), 0.0]))
+                        lam_max = float(np.max(ew))
+                        cond_A  = float(lam_max / max(lam_min, 1e-12))
+
+                        # Λ from your function was damped; recompute eigs of Λ actually used
+                        # (Λ was returned as a symmetric "damped inverse" of A)
+                        # If you want eigs of Λ, do:
+                        ew_L = np.linalg.eigvalsh(Lambda)
+                        Lmin = float(np.min(ew_L))
+                        Lmax = float(np.max(ew_L))
+                        cond_L = float(Lmax / max(Lmin, 1e-12))
+
+                        # --- Norms for what is going off the rails ---
+                        norms = dict(
+                            e_p=float(np.linalg.norm(e_p)),
+                            e_r_left=float(ang_left),
+                            e_r_right=float(ang_right),
+                            f=float(np.linalg.norm(f)),
+                            a=float(np.linalg.norm(a)),
+                            qddot=float(np.linalg.norm(qddot_sol)),
+                            e_acc=float(np.linalg.norm(e_acc_p)),
+                        )
+
+                        # --- NaN/Inf guards ---
+                        def _bad(x): 
+                            xv = np.asarray(x)
+                            return np.any(~np.isfinite(xv))
+                        flags = dict(
+                            nan_a=_bad(a), nan_f=_bad(f),
+                            nan_J=_bad(J), nan_Lambda=_bad(Lambda),
+                            nan_eacc=_bad(e_acc_p)
+                        )
+
+                        # --- Print summary ---
+                        arm_tag = "RIGHT" if getattr(self.robot, "ip", "").endswith(".66") else "LEFT"
+                        print(f"\n[DBG {arm_tag}] t={i*dt:5.2f}s  QP:{self.qp.status}  obj={self.qp.value:.3e}")
+                        print(f"  rot err (left=R_ref Rᵀ):   |r|={ang_left:.4f},  r={r_left.round(4)}")
+                        print(f"  rot err (right=Rᵀ R_ref): |r|={ang_right:.4f}, r={r_right.round(4)}")
+                        print(f"  w_meas: {w_meas.round(4)}  w_pred(Jq̇): {w_pred.round(4)}  |e|={np.linalg.norm(w_meas-w_pred):.6f}")
+                        print(f"  w_fd1(diff rotvec/dt): {w_fd1.round(4)}   |e|={np.linalg.norm(w_fd1-w_meas):.6f}")
+                        print(f"  w_fd2(log-map→world): {w_fd2.round(4)}   |e|={np.linalg.norm(w_fd2-w_meas):.6f}")
+                        print(f"  norms: { {k: round(v,6) for k,v in norms.items()} }")
+                        print(f"  A eig[min,max]={lam_min:.3e}, {lam_max:.3e}  cond(A)={cond_A:.2e}")
+                        print(f"  Λ eig[min,max]={Lmin:.3e}, {Lmax:.3e}  cond(Λ)={cond_L:.2e}")
+                        print(f"  obj_terms: trans={obj_trans_chk:.3e}  rot={obj_rot_chk:.3e}  reg={obj_reg_chk:.3e}  total={obj_tot_chk:.3e}")
+                        if any(flags.values()):
+                            print(f"  [WARN] non-finite detected: { {k:v for k,v in flags.items() if v} }")
+
+                        # keep prevs
+                        r_prev = r
+                        R_prev = R
+                    except Exception as _dbg_e:
+                        print(f"[DBG ERROR] {type(_dbg_e).__name__}: {_dbg_e}")
+
+
+                
+
                 # ---- feed params to QP ----
                 self.J_p.value     = _freeze_sparsity(J)
                 self.Jdot_p.value  = _freeze_sparsity(Jdot)
@@ -245,7 +372,17 @@ class JointOptimizationSingleArm():
                 self._total_solver_time += _solve_dt
 
                 # ---- extract solution ----
-                qddot_sol = np.asarray(self.qddot_var.value).reshape(-1)
+                status_str = (self.qp.status or "").lower()
+                has_sol = (self.qddot_var.value is not None) and (np.asarray(self.qddot_var.value).size > 0)
+
+                if not has_sol or status_str not in ("optimal", "optimal_inaccurate"):
+                    # Fallback: zero accel (or keep previous accel if you store it)
+                    n = int(self.q_p.size) if hasattr(self.q_p, "size") else self.robot.get_q().shape[0]
+                    qddot_sol = np.zeros(n, dtype=float)
+                    # Optional: print a compact reason to the console
+                    print(f"[QP] No solution (status={self.qp.status}); using qddot=0 fallback.")
+                else:
+                    qddot_sol = _as_rowvec_1d(self.qddot_var.value, "qddot_sol", length=int(self.q_p.size))
 
                 # ---- diagnostics / objective breakdown ----
                 Jp    = self.J_p.value
@@ -746,15 +883,35 @@ class URImpedanceController(URForceController):
         M = pin.crba(self.pin_model, self.pin_data, q)
         return np.asarray(0.5 * (M + M.T))
 
-    def get_Lambda(self, J, M, lam2=1e-3):
+    def get_Lambda(self, J, M, lam2_base=1e-5, cond_ref=1e5):
+        """
+        Return Λ ≈ (J M^{-1} Jᵀ)^{-1} with adaptive Tikhonov damping.
+        - lam2_base: nominal damping
+        - cond_ref : reference conditioning where we start increasing damping
+        """
+        # A = J M^{-1} Jᵀ (symmetric PSD)
         Minv = np.linalg.inv(M)
         A = J @ Minv @ J.T
         A = 0.5 * (A + A.T)
 
-        # damped "inverse" to get operational-space inertia
-        U, S, Vt = np.linalg.svd(A, full_matrices=False)
-        S_dinv = S / (S**2 + lam2)
-        Lam = (Vt.T * S_dinv) @ U.T
+        # condition estimate
+        ew = np.linalg.eigvalsh(A)
+        ew = np.clip(ew, 0.0, None)              # numerical floor at 0
+        ew_min = float(np.min(ew))
+        ew_max = float(np.max(ew)) if ew.size else 0.0
+        condA  = (ew_max / max(ew_min, 1e-12)) if ew_max > 0 else 1.0
+
+        # adaptive damping: scale with conditioning
+        lam2 = lam2_base * max(1.0, condA / cond_ref)
+
+        # damped inverse of A  (Tikhonov): A# = V diag( s / (s^2 + lam2) ) Vᵀ
+        # Use eigh since A is symmetric
+        w, V = np.linalg.eigh(A)
+        w = np.clip(w, 0.0, None)
+        winv_damped = w / (w*w + lam2)
+        Lam = (V * winv_damped) @ V.T            # ≈ A^{-1} when well-conditioned
+
+        # symmetrize for safety
         return 0.5 * (Lam + Lam.T)
 
     def get_D(self, K, Lambda):
@@ -772,15 +929,14 @@ class URImpedanceController(URForceController):
 
 if __name__ == "__main__":
     # impedance gains: lower last 3 if orientation is too aggressive
-    K = np.diag([400, 400, 400, 1, 1, 1])
-
+    K = np.diag([400, 400, 400, 0.3, 0.3, 0.3])
     robotR = URImpedanceController(
-        "192.168.1.33",
+        "192.168.1.66",
         K=K
     )
 
     trajectory = "motion_planner/trajectories/lift_100.npz"
-    Hz = 70
+    Hz = 50
 
     optimizer = JointOptimizationSingleArm(
         robot=robotR,
@@ -790,6 +946,11 @@ if __name__ == "__main__":
 
     try:
         # user-defined approach positioning before control
+        robotR.wait_for_commands()
+        robotR.go_home()
+        robotR.wait_for_commands()
+        robotR.wait_until_done()
+
         robotR.go_to_approach()
         robotR.wait_for_commands()
         robotR.wait_until_done()

@@ -57,6 +57,11 @@ class VectorPIDController:
         self.last_error = error_vector.copy()
         self.last_time = current_time
         return output, P_term, I_term, D_term
+    
+    def update_weights(self, kp=None, ki=None, kd=None):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
 
     def reset(self):
         self.integral = np.zeros(3)
@@ -90,6 +95,10 @@ class URForceController(URController):
         self.lifting = False
         self.control_thread = None
         self.control_stop = threading.Event()
+
+        self.kp_f=kp_f
+        self.ki_f=ki_f
+        self.kd_f=kd_f
 
         self.control_rate_hz = hz
         self.force_pid = VectorPIDController(kp=kp_f, ki=ki_f, kd=kd_f, dt=1 / hz)
@@ -288,6 +297,16 @@ class URForceController(URController):
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
             try:
+                if not trajectory_started:
+                        reference_force = 50 # 150
+                        base_force = 12.5
+                        factor = base_force / reference_force
+
+                        kp_f = 0.0038 * factor
+                        ki_f = 0.0000 * factor
+                        kd_f = 0.0025 * factor
+                        self.force_pid.update_weights(kp=kp_f, ki=ki_f, kd=kd_f)
+
                 state = self.get_state()
                 current_force_vector = np.array(state["filtered_force_world"][:3])
                 current_position = np.array(state["gripper_world"][:3])
@@ -309,6 +328,8 @@ class URForceController(URController):
                 if current_time >= 3.0 and not trajectory_started:
                     trajectory_started = True
                     print(f"Starting trajectory at t={current_time:.1f}s")
+                    self.force_pid.update_weights(kp=self.kp_f, ki=self.ki_f, kd=self.kd_f)
+
 
                 # =========================== Trajectory Updates ===========================
                 if (

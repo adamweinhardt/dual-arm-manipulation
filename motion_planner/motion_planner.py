@@ -1017,16 +1017,16 @@ if __name__ == "__main__":
         ]
     )
 
-    hz = 70
+    hz = 100
     dt = 1 / hz
     up = planner.linear(pose1, pose2, dt, max_velocity=0.5, max_acceleration=0.25)
     UP = planner.linear(pose1, pose9, dt, max_velocity=0.25, max_acceleration=0.1)
     side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
     down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
     twist = planner.linear(pose2, pose5, dt, max_velocity=0.25, max_acceleration=0.1)
-    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.05, max_acceleration=0.1)
+    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.25, max_acceleration=0.2)
     side_y_back = planner.linear(
-        pose6, pose2, dt, max_velocity=0.05, max_acceleration=0.1
+        pose6, pose2, dt, max_velocity=0.25, max_acceleration=0.2
     )
     hold_side = planner.hold(pose6, 1.0, dt)
     hold_middle = planner.hold(pose2, 1.0, dt)
@@ -1048,8 +1048,8 @@ if __name__ == "__main__":
         start_pose=pose2,
         dt=dt,
         radius=0.2,
-        max_velocity=0.2,        # m/s along arc
-        max_acceleration=0.1,    # m/s^2 along arc
+        max_velocity=0.25,        # m/s along arc
+        max_acceleration=0.2,    # m/s^2 along arc
         keep_orientation=True,     # keep same tool orientation
         ccw=True,
         label="circle_xy_ccw"
@@ -1058,11 +1058,11 @@ if __name__ == "__main__":
 
 
 
-    # full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
+    full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
     # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
     # full_trajectory = planner.concatenate_trajectories([up, circle, down]) #circle
     #full_trajectory = planner.concatenate_trajectories([up, twist]) #twist
-    full_trajectory = planner.concatenate_trajectories([UP, hold_9])
+    #full_trajectory = planner.concatenate_trajectories([UP, hold_9])
     fig3d, _ = full_trajectory.plot_3d()
     fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
 
@@ -1073,4 +1073,4 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/lift_70.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/side_y_fast.npz")
