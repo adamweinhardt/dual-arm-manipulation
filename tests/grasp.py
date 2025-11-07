@@ -1,4 +1,4 @@
-from control.pid_controller import URForceController
+from control.pid_ff_controller import URForceController
 import numpy as np
 import time
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0
 
-    alpha = 0.99
+    alpha = 0.85
     deadzone_threshold = 0.01
 
     robotL = URForceController(
@@ -83,14 +83,14 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=0.2,
-            timeout=15,
+            timeout=6,
             deadzone_threshold=deadzone_threshold,
         )
 
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=0.2,
-            timeout=15,
+            timeout=6,
             deadzone_threshold=deadzone_threshold,
         )
 

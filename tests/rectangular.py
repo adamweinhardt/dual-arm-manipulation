@@ -5,13 +5,13 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 80  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0018 * factor
+    kp_f = 0.025 * factor
     ki_f = 0.0000 * factor
-    kd_f = 0.0001 * factor
+    kd_f = 0.005 * factor
 
     kp_p = 1.1  # 0.5
     ki_p = 0.00005
@@ -25,7 +25,7 @@ if __name__ == "__main__":
     Ki_p = 0
     Kd_p = 0.05
 
-    alpha = 0.9
+    alpha = 0.85
     deadzone_threshold = 0.02
     trajectory = "motion_planner/trajectories/rectangular_fast.npz"
 

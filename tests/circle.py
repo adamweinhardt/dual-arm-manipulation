@@ -5,13 +5,13 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 100  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0022 * factor
+    kp_f = 0.025 * factor
     ki_f = 0.0000 * factor
-    kd_f = 0.00012 * factor
+    kd_f = 0.005 * factor
 
     kp_p = 1.1  # 0.5
     ki_p = 0.00005
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=25,
+            timeout=20,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=25,
+            timeout=20,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -117,8 +117,7 @@ if __name__ == "__main__":
 
         robotR.plot_data3D()
         robotL.plot_data3D()
-        robotR.plot_PID()
-        robotL.plot_PID()
+
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

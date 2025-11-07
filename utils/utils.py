@@ -235,3 +235,21 @@ def _freeze_sparsity(A, eps=1e-12):
     A = np.asarray(A, dtype=float).copy()
     A[A == 0.0] = eps
     return A
+
+def _as_rowvec_1d(x, name, length=None):
+    a = np.asarray(x, dtype=float).squeeze()
+    if a.ndim != 1:
+        raise ValueError(f"{name} must be 1-D after squeeze, got {a.shape}")
+    if length is not None and a.shape[0] != length:
+        raise ValueError(f"{name} length {a.shape[0]} != {length}")
+    return a
+
+def _as_2d(x, name, shape0=None, shape1=None):
+    a = np.asarray(x, dtype=float).squeeze()
+    if a.ndim != 2:
+        raise ValueError(f"{name} must be 2-D after squeeze, got {a.shape}")
+    if shape0 is not None and a.shape[0] != shape0:
+        raise ValueError(f"{name} shape[0] {a.shape[0]} != {shape0}")
+    if shape1 is not None and a.shape[1] != shape1:
+        raise ValueError(f"{name} shape[1] {a.shape[1]} != {shape1}")
+    return a

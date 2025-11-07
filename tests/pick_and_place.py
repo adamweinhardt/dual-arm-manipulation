@@ -1,17 +1,17 @@
-from control.pid_controller import URForceController
+from control.pid_ff_controller import URForceController
 import numpy as np
 import time
 
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 75  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0015 * factor
+    kp_f = 0.0065 * factor
     ki_f = 0.0001 * factor
-    kd_f = 0.0004 * factor
+    kd_f = 0.001 * factor
 
     kp_p = 1.2  # 0.5
     ki_p = 0.00005
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    alpha = 0.99
+    alpha = 0.85
     deadzone_threshold = 0.02
     trajectory = "motion_planner/trajectories/pick_and_place.npz"
 
