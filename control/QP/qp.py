@@ -72,20 +72,45 @@ class URImpedanceController(URForceController):
         M = pin.crba(self.pin_model, self.pin_data, q)
         return np.asarray(0.5 * (M + M.T))
 
-    def get_Lambda(self, J, M, lam2_base=1e-5, cond_ref=1e5):
-        # damped operational-space "inverse inertia"
-        Minv = np.linalg.inv(M)
-        A = J @ Minv @ J.T
-        A = 0.5 * (A + A.T)
-        w, V = np.linalg.eigh(A)
-        w = np.clip(w, 0.0, None)
-        wmin = float(np.min(w)) if w.size else 0.0
-        wmax = float(np.max(w)) if w.size else 0.0
-        condA = (wmax / max(wmin, 1e-12)) if wmax > 0 else 1.0
-        lam2 = lam2_base * max(1.0, condA / cond_ref)
-        winv_damped = w / (w * w + lam2)
-        Lam = (V * winv_damped) @ V.T
-        return 0.5 * (Lam + Lam.T)
+    # def get_Lambda(self, J, M, lam2_base=1e-5, cond_ref=5):
+    #     # damped operational-space "inverse inertia"
+    #     Minv = np.linalg.inv(M)
+    #     A = J @ Minv @ J.T
+    #     A = 0.5 * (A + A.T)
+    #     w, V = np.linalg.eigh(A)
+    #     w = np.clip(w, 1e-6, 1e6)
+    #     wmin = float(np.min(w)) if w.size else 0.0
+    #     wmax = float(np.max(w)) if w.size else 0.0
+    #     condA = (wmax / max(wmin, 1e-12)) if wmax > 0 else 1.0
+    #     lam2 = lam2_base * max(1.0, condA / cond_ref)
+    #     winv_damped = w / (w * w + lam2)
+    #     Lam = (V * winv_damped) @ V.T
+    #     return 0.5 * (Lam + Lam.T)
+
+    def get_Lambda(self, J, M,  regularization: float = 1e-10):
+        try:
+            # Check shapes
+            if M.shape[0] != M.shape[1]:
+                raise ValueError("M_i must be a square matrix.")
+            if J.shape[1] != M.shape[0]:
+                raise ValueError("J_i and M_i dimensions do not align.")
+
+            # Compute M_i inverse safely
+            M_inv = np.linalg.pinv(M)  # pseudoinverse is safer than inv
+
+            # Compute the intermediate matrix
+            inner = J @ M_inv @ J.T
+
+            # Add a small regularization term to ensure invertibility
+            inner_reg = inner + regularization * np.eye(inner.shape[0])
+
+            # Compute the final inverse
+            Lambda_i = np.linalg.pinv(inner_reg)
+            return Lambda_i
+
+        except np.linalg.LinAlgError as e:
+            raise RuntimeError(f"Matrix inversion failed: {e}")
+
 
     def get_D(self, K, Lambda):
         S_L = sqrtm(Lambda)
@@ -211,11 +236,18 @@ class DualArmImpedanceAdmittanceQP:
     # QP build
     # ---------------------------------------------------------
     def build_qp(self, dt):
+        """
+        QP build including optional posture task regularization.
+        Keeps the same impedance + grasping formulation, but adds a weak
+        joint-space "posture" term to stabilize the configuration and prevent drift.
+        """
         n = 6
         self.qddot_L = cp.Variable(n, name="qddot_L")
         self.qddot_R = cp.Variable(n, name="qddot_R")
 
-        # parameters (updated each loop)
+        # ===============================================================
+        # Parameters (updated each loop)
+        # ===============================================================
         self.J_L_p = cp.Parameter((6, n), name="J_L")
         self.Jdot_L_p = cp.Parameter((6, n), name="Jdot_L")
         self.qdot_L_p = cp.Parameter(n, name="qdot_L")
@@ -236,13 +268,31 @@ class DualArmImpedanceAdmittanceQP:
         self.dt_c = cp.Constant(float(dt))
         self.dt2_c = cp.Constant(float(0.5 * dt * dt))
 
-        # Next-step joint states
+        # ===============================================================
+        # Posture task (new)
+        # ===============================================================
+        self.q_post_L_p    = cp.Parameter(n, name="q_post_L")
+        self.qdot_post_L_p = cp.Parameter(n, name="qdot_post_L")
+        self.q_post_R_p    = cp.Parameter(n, name="q_post_R")
+        self.qdot_post_R_p = cp.Parameter(n, name="qdot_post_R")
+
+        self.S_post_L = cp.Parameter((n, n), name="S_post_L")
+        self.S_post_R = cp.Parameter((n, n), name="S_post_R")
+
+        self.k_pos_c  = cp.Constant(15.0)    # posture "stiffness" gain
+        self.w_post_c = cp.Constant(2e4)   # posture cost weight (small)
+
+        # ===============================================================
+        # State update expressions
+        # ===============================================================
         qdot_next_L = self.qdot_L_p + self.qddot_L * self.dt_c
         qdot_next_R = self.qdot_R_p + self.qddot_R * self.dt_c
         q_next_L = self.q_L_p + self.qdot_L_p * self.dt_c + self.qddot_L * self.dt2_c
         q_next_R = self.q_R_p + self.qdot_R_p * self.dt_c + self.qddot_R * self.dt2_c
 
-        # Task-space errors
+        # ===============================================================
+        # Task-space impedance and grasping errors
+        # ===============================================================
         e_imp_L = self.J_L_p @ self.qddot_L + self.Jdot_L_p @ self.qdot_L_p - self.xddot_des_L_p
         e_imp_R = self.J_R_p @ self.qddot_R + self.Jdot_R_p @ self.qdot_R_p - self.xddot_des_R_p
 
@@ -251,16 +301,44 @@ class DualArmImpedanceAdmittanceQP:
         e_grasp_L = xdot_next_L - self.xdot_des_L_p
         e_grasp_R = xdot_next_R - self.xdot_des_R_p
 
-        obj_L = cp.sum_squares(self.W_imp_c @ e_imp_L) + cp.sum_squares(self.W_grasp_c @ e_grasp_L) \
-              + self.lam_reg * cp.sum_squares(self.qddot_L)
-        obj_R = cp.sum_squares(self.W_imp_c @ e_imp_R) + cp.sum_squares(self.W_grasp_c @ e_grasp_R) \
-              + self.lam_reg * cp.sum_squares(self.qddot_R)
+        # ===============================================================
+        # Posture task errors
+        # ===============================================================
+        # β = 2√k (q̇*_post − q̇) + k (q*_post − q)
+        beta_L = 2.0 * cp.sqrt(self.k_pos_c) * (self.qdot_post_L_p - self.qdot_L_p) \
+                + self.k_pos_c * (self.q_post_L_p - self.q_L_p)
+        beta_R = 2.0 * cp.sqrt(self.k_pos_c) * (self.qdot_post_R_p - self.qdot_R_p) \
+                + self.k_pos_c * (self.q_post_R_p - self.q_R_p)
+
+        e_post_L = self.S_post_L @ self.qddot_L - beta_L
+        e_post_R = self.S_post_R @ self.qddot_R - beta_R
+
+        # ===============================================================
+        # Objective
+        # ===============================================================
+        obj_L = (
+            cp.sum_squares(self.W_imp_c @ e_imp_L)
+            + cp.sum_squares(self.W_grasp_c @ e_grasp_L)
+            + self.lam_reg * cp.sum_squares(self.qddot_L)
+            + self.w_post_c * cp.sum_squares(e_post_L)     # posture regularization
+        )
+
+        obj_R = (
+            cp.sum_squares(self.W_imp_c @ e_imp_R)
+            + cp.sum_squares(self.W_grasp_c @ e_grasp_R)
+            + self.lam_reg * cp.sum_squares(self.qddot_R)
+            + self.w_post_c * cp.sum_squares(e_post_R)
+        )
+
         obj = obj_L + obj_R
 
-        # constraints
+        # ===============================================================
+        # Constraints
+        # ===============================================================
         q_pos_lim = self.joint_pose_limit
         q_vel_lim = self.joint_speed_limit
         q_acc_lim = self.joint_accel_limit
+
         cons = [
             -q_pos_lim <= q_next_L, q_next_L <= q_pos_lim,
             -q_pos_lim <= q_next_R, q_next_R <= q_pos_lim,
@@ -270,12 +348,15 @@ class DualArmImpedanceAdmittanceQP:
             -q_acc_lim <= self.qddot_R, self.qddot_R <= q_acc_lim,
         ]
 
+        # ===============================================================
+        # Build QP
+        # ===============================================================
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         self.qp_kwargs = dict(
-            eps_abs=3e-6,
-            eps_rel=3e-6,
+            eps_abs=6e-6,
+            eps_rel=6e-6,
             alpha=1.6,
-            max_iter=12000,
+            max_iter=20000,
             adaptive_rho=True,
             adaptive_rho_interval=45,
             polish=True,
@@ -283,16 +364,18 @@ class DualArmImpedanceAdmittanceQP:
             warm_start=True,
         )
 
+
     # ---------------------------------------------------------
     # Main control loop
     # ---------------------------------------------------------
-    def run(self, timeout_s: float | None = None, auto_plot: bool = True):
+    def run(self, timeout_s: float | None = None):
         """
         If timeout_s is given, stop after that many seconds and auto-plot (if enabled).
         First ref_start_delay_s seconds: pure grasping (admittance only).
         After that: use trajectory references initialized from current TCPs.
         """
         self.load_and_init_refs(self.trajectory_path)
+        trajectory_started = False
         t_idx = 0
         time.sleep(0.1)
 
@@ -307,12 +390,29 @@ class DualArmImpedanceAdmittanceQP:
 
         self._ctrl_start_wall = time.perf_counter()
         self._last_log_wall = self._ctrl_start_wall
-        print(f"[COMBINED QP] start | F*_n={self.F_n_star} N, k_f={self.k_f}, v_max={self.v_max} | "
-              f"traj={'yes' if self.traj_len>0 else 'no'} delay={self.ref_start_delay_s:.2f}s")
 
         # prepare integrated q_cmd traces for plotting
         self._qcmd_L = self.robotL.get_q().copy()
         self._qcmd_R = self.robotR.get_q().copy()
+
+        # --- posture reference setup ---
+        qL0 = self.robotL.get_q().copy()
+        qR0 = self.robotR.get_q().copy()
+
+        self.q_post_L = self.robotL.home_joints
+        self.qdot_post_L = np.zeros_like(qL0)
+        self.q_post_R = self.robotR.home_joints
+        self.qdot_post_R = np.zeros_like(qR0)
+
+        # select which joints to stabilize (1=on, 0=off)
+        S_mask = np.diag([0, 1, 1, 1, 1, 0]).astype(float)
+        self.S_post_L.value = S_mask
+        self.S_post_R.value = S_mask
+
+        self.q_post_L_p.value = self.q_post_L
+        self.qdot_post_L_p.value = self.qdot_post_L
+        self.q_post_R_p.value = self.q_post_R
+        self.qdot_post_R_p.value = self.qdot_post_R
 
         try:
             while not self.control_stop.is_set():
@@ -362,6 +462,7 @@ class DualArmImpedanceAdmittanceQP:
 
                 # ---------- References (your format, after delay) ----------
                 if (self.traj_len > 0) and (elapsed_total >= self.ref_start_delay_s):
+                    trajectory_started = True
                     t_idx = int(np.clip((elapsed_total - self.ref_start_delay_s) * self.Hz, 0, self.traj_len - 1))
 
                     p_ref_L = self.position_ref_L[t_idx]
@@ -458,6 +559,60 @@ class DualArmImpedanceAdmittanceQP:
                 # ---------- Per-arm tcp dicts for plotting ----------
                 rvec_L      = RR.from_matrix(R_cur_L).as_rotvec()
                 rvec_ref_L  = RR.from_matrix(R_ref_L).as_rotvec()
+
+                if i % 20 == 0 and trajectory_started:
+                    # ---------- compute helpful debug values ----------
+                    condJL = np.linalg.cond(J_L)
+                    condJR = np.linalg.cond(J_R)
+
+                    e_pL_mag = np.linalg.norm(e_p_L)
+                    e_pR_mag = np.linalg.norm(e_p_R)
+                    e_rL_mag = np.linalg.norm(e_r_L)
+                    e_rR_mag = np.linalg.norm(e_r_R)
+                    e_vL_mag = np.linalg.norm(e_v_L)
+                    e_vR_mag = np.linalg.norm(e_v_R)
+                    e_wL_mag = np.linalg.norm(e_w_L)
+                    e_wR_mag = np.linalg.norm(e_w_R)
+
+                    aL_mag = np.linalg.norm(a_des_L)
+                    aR_mag = np.linalg.norm(a_des_R)
+                    qddL_mag = np.linalg.norm(qddL)
+                    qddR_mag = np.linalg.norm(qddR)
+
+                    # twist consistency (jacobian vs measured)
+                    twist_pred_L = J_L @ qdL
+                    twist_pred_R = J_R @ qdR
+                    twist_meas_L = np.hstack([v_L, w_L])
+                    twist_meas_R = np.hstack([v_R, w_R])
+                    twist_err_L = twist_pred_L - twist_meas_L
+                    twist_err_R = twist_pred_R - twist_meas_R
+                    twist_errL_lin = np.linalg.norm(twist_err_L[:3])
+                    twist_errR_lin = np.linalg.norm(twist_err_R[:3])
+                    twist_errL_ang = np.linalg.norm(twist_err_L[3:])
+                    twist_errR_ang = np.linalg.norm(twist_err_R[3:])
+
+                    # Λ spectrum
+                    eigL = np.linalg.eigvalsh(Lam_L)
+                    eigR = np.linalg.eigvalsh(Lam_R)
+                    lamL_min, lamL_max = eigL.min(), eigL.max()
+                    lamR_min, lamR_max = eigR.min(), eigR.max()
+
+                    # qp objective parts
+                    obj_parts = f"impL={imp_L_term:.2e}, impR={imp_R_term:.2e}, reg={reg_term:.2e}, total={obj_total:.2e}"
+
+                    # ramp factor
+                    print(f"\n[DBG] t={elapsed_total:6.2f}s ")
+                    print(f"  cond(J) [L,R]=({condJL:6.2f}, {condJR:6.2f}) | Λ[min,max]_L=({lamL_min:.2e},{lamL_max:.2e})  "
+                        f"Λ[min,max]_R=({lamR_min:.2e},{lamR_max:.2e})")
+                    print(f"  e_p [L,R]=({e_pL_mag:.4f},{e_pR_mag:.4f})  e_r [L,R]=({e_rL_mag:.4f},{e_rR_mag:.4f})")
+                    print(f"  e_v [L,R]=({e_vL_mag:.4f},{e_vR_mag:.4f})  e_w [L,R]=({e_wL_mag:.4f},{e_wR_mag:.4f})")
+                    print(f"  ‖a_des‖ [L,R]=({aL_mag:.2e},{aR_mag:.2e})  ‖q̈‖ [L,R]=({qddL_mag:.2e},{qddR_mag:.2e})")
+                    print(f"  twist_err_lin [L,R]=({twist_errL_lin:.2e},{twist_errR_lin:.2e})  "
+                        f"twist_err_ang [L,R]=({twist_errL_ang:.2e},{twist_errR_ang:.2e})")
+                    print(f"  {obj_parts}")
+                    print(f"  status={self.qp.status} | solver_time={_solve_dt*1e3:.2f} ms | Hz≈{1.0/max(elapsed,1e-9):5.2f}\n")
+
+
                 tcp_L = {
                     "p":        p_L, "v": v_L, "w": w_L, "rvec": rvec_L,
                     "p_ref":    p_ref_L, "v_ref": v_ref_L, "w_ref": w_ref_L, "rvec_ref": rvec_ref_L,
@@ -521,7 +676,8 @@ class DualArmImpedanceAdmittanceQP:
 
                 if (t_idx >= self.traj_len - 1) and (self.traj_len > 0):
                     self.robotL.speedStop(); self.robotR.speedStop()
-                    print(f"[COMBINED QP] reached end of trajectory at t={elapsed_total:.2f}s → stopping.")                
+                    print(f"[COMBINED QP] reached end of trajectory at t={elapsed_total:.2f}s → stopping.")
+                    break               
 
                 time.sleep(max(0, dt - elapsed))
                 i += 1
@@ -813,23 +969,23 @@ class DualArmImpedanceAdmittanceQP:
 # Example main
 # =============================================================
 if __name__ == "__main__":
-    Hz = 50
-    K_L = np.diag([400, 400, 400, 1, 1, 1])
-    K_R = np.diag([400, 400, 400, 0.1, 0.1, 0.1])
+    Hz = 60
+    K = np.diag([600, 600, 600, 1, 1, 1])
 
-    robotL = URImpedanceController("192.168.1.33", K=K_L)
-    robotR = URImpedanceController("192.168.1.66", K=K_R)
+    robotL = URImpedanceController("192.168.1.33", K=K)
+    robotR = URImpedanceController("192.168.1.66", K=K)
 
     # Weighting matrices
-    W_imp = diag6([4e4, 4e4, 4e4, 2e3, 2e3, 2e3])
+    W_imp = diag6([5e4, 5e4, 5e4, 5e3, 5e3, 5e3])
     W_grasp = diag6([0, 0, 0, 0.0, 0.0, 0.0])
+    lam_reg = 1e-4
 
     # Common trajectory (world deltas) → both arms, starts after 3s
     trajectory = "motion_planner/trajectories/lift_100.npz"
 
     ctrl = DualArmImpedanceAdmittanceQP(
         robotL, robotR, Hz=Hz,
-        W_imp=W_imp, W_grasp=W_grasp, lam_reg=1e-8,
+        W_imp=W_imp, W_grasp=W_grasp, lam_reg=lam_reg,
         admittance_gain=3e-4, v_max=0.1, F_n_star=25.0,
         trajectory_path=trajectory,   # uses your format & init rule
         ref_start_delay_s=3.0         # first 3s: grasp only
