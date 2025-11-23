@@ -74,18 +74,42 @@ class URImpedanceController(URForceController):
 
     def get_qdot(self):
         return np.array(self.rtde_receive.getActualQd(), dtype=float)
+    
+    def get_J(self, q):
+        """Jacobian J via RTDE API, transformed to World frame."""
+        # Assuming self.rtde_control is inherited and available
+        J_flat = self.rtde_control.getJacobian(q.tolist())
+        J_base = np.array(J_flat, dtype=float).reshape((6, 6))
+        # Assumes get_J_world is inherited and available
+        return self.get_J_world2(J_base)
+
+    def get_Jdot(self, q, v):
+        """Jacobian Time Derivative Jdot via RTDE API, transformed to World frame."""
+        # Assuming self.rtde_control is inherited and available
+        Jdot_flat = self.rtde_control.getJacobianTimeDerivative(q.tolist(), v.tolist())
+        Jdot_base = np.array(Jdot_flat, dtype=float).reshape((6, 6))
+        # Assumes get_J_world is inherited and available
+        return self.get_J_world2(Jdot_base)
+
+    def get_M_pin(self, q):
+        """Mass Matrix M via RTDE API (Joint Space)."""
+        # Assuming self.rtde_control is inherited and available
+        M_flat = self.rtde_control.getMassMatrix(q.tolist(), include_rotors_inertia=True)
+        M = np.array(M_flat, dtype=float).reshape((6, 6))
+        M_sym = 0.5 * (M + M.T)
+        return M_sym
 
     # kinematics
-    def get_J(self, q):
+    def get_J_pin(self, q):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
         J = pin.getFrameJacobian(
             self.pin_model, self.pin_data, self.pin_frame_id,
             pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
-        return self.get_J_world(J)
+        return self.get_J_world_pin(J)
 
-    def get_Jdot(self, q, v):
+    def get_Jdot_pin(self, q, v):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
         pin.computeJointJacobiansTimeVariation(self.pin_model, self.pin_data, q, v)
@@ -93,7 +117,7 @@ class URImpedanceController(URForceController):
             self.pin_model, self.pin_data, self.pin_frame_id,
             pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
-        return self.get_J_world(dJ)
+        return self.get_J_world_pin(dJ)
 
     # dynamics
     def get_M(self, q):
@@ -107,9 +131,14 @@ class URImpedanceController(URForceController):
         """
         Minv = np.linalg.inv(M)
         A = J @ Minv @ J.T
+        # Add a stronger symmetry enforcement here:
         A = 0.5 * (A + A.T)
         w, V = np.linalg.eigh(A)
-        w_d = np.maximum(w + float(tikhonov), 1e-12)
+
+        w_floor = max(1e-4, float(tikhonov)) 
+        
+        w_d = np.maximum(w + float(tikhonov), w_floor) # Now w_d is guaranteed > 1e-4
+
         Lambda = V @ np.diag(1.0 / w_d) @ V.T
         return np.asarray(0.5 * (Lambda + Lambda.T))
 
@@ -159,7 +188,7 @@ class SingleArmImpedanceQP:
         # symmetric limits
         self.joint_pose_limit  = np.deg2rad(360.0)   # rad
         self.joint_speed_limit = np.deg2rad(180.0)   # rad/s
-        self.joint_accel_limit = np.deg2rad(5000)   # rad/s^2
+        self.joint_accel_limit = np.deg2rad(90)   # rad/s^2
 
         # weights
         self.W_imp_np = np.asarray(W_imp, dtype=float)
@@ -247,10 +276,10 @@ class SingleArmImpedanceQP:
 
         self.prob = cp.Problem(cp.Minimize(obj), cons)
         self.prob_kwargs = dict(
-            eps_abs=1e-7,
-            eps_rel=1e-7,
+            eps_abs=3e-6,
+            eps_rel=3e-6,
             alpha=1.6,
-            max_iter=15000,
+            max_iter=5000,
             adaptive_rho=True,
             adaptive_rho_interval=45,
             polish=True,
@@ -320,6 +349,8 @@ class SingleArmImpedanceQP:
                 #e_r = pin.log3(e_R)
                 e_r = short_arc_log(R_ref, R)
                 e_w = w_ref - w
+                X_err  = np.hstack((e_p, e_r))
+                Xd_err = np.hstack((e_v, e_w))
 
                 # desired wrench/accel (ẍ = Λ^{-1} F)
                 f_des = self.robot.wrench_desired(self.robot.K, D, e_p, e_r, e_v, e_w)
@@ -357,54 +388,64 @@ class SingleArmImpedanceQP:
                 reg_term = float(self.lambda_reg) * float(qdd_sol @ qdd_sol)
                 obj_total = imp_term + reg_term
 
-                # --- DEBUG PULSE ------------------------------------------------------------
                 if i % 50 == 0:
-                    # keep a previous orientation for finite-diff angular velocity
-                    if not hasattr(self, "_dbg_prev_R"):
-                        self._dbg_prev_R = R
-                        self._dbg_prev_r = RR.from_matrix(R).as_rotvec()
-
+                    # 1. Arm Identifier
                     arm = "LEFT" if str(getattr(self.robot, "ip", "")).endswith(".33") else ("RIGHT" if str(getattr(self.robot,"ip","")).endswith(".66") else "?")
-
-                    # frames:
-                    #   J : LOCAL_WORLD_ALIGNED  (WORLD axes)
-                    #   w_meas_W : WORLD (from state["speed_world"])
-                    #   w_meas_BASE : ROBOT BASE (from state["speed"])
-                    #   w_pred_W : WORLD (J q̇)
+                    
+                    # 2. Kinematic Consistency Check (WORLD FRAME)
+                    # Predicted end-effector twist: J * qdot
                     xdot_pred = J @ qdot
-                    w_pred_W  = xdot_pred[3:]
+                    v_pred_W  = xdot_pred[:3] # Predicted Linear Velocity
+                    w_pred_W  = xdot_pred[3:] # Predicted Angular Velocity
 
-                    w_meas_W     = np.array(state["speed_world"][3:6])
-                    w_meas_BASE  = np.array(state["speed"][3:6])
+                    v_meas_W  = np.array(state["speed_world"][:3]) # Measured Linear Velocity
+                    w_meas_W  = np.array(state["speed_world"][3:6]) # Measured Angular Velocity
 
-                    # orientation errors (in WORLD vs BODY conventions)
-                    r_left  = pin.log3(R_ref @ R.T)      # left-invariant (WORLD axes)
-                    r_right = pin.log3(R.T @ R_ref)      # right-invariant (BODY axes)
-
-                    # finite-diff angular velocity in WORLD
-                    R_prev  = self._dbg_prev_R
-                    r_prev  = self._dbg_prev_r
-                    w_fd1_W = (RR.from_matrix(R).as_rotvec() - r_prev) / max(dt, 1e-6)
-                    dR      = R @ R_prev.T
-                    w_fd2_W = (R @ pin.log3(dR)) / max(dt, 1e-6)
-
-                    # Λ conditioning
-                    ew = np.linalg.eigvalsh(0.5 * (Lam + Lam.T))
+                    # 3. Task-Space Inertia (Lambda) Health Check
+                    # Ensure Lam is symmetric for eigvalsh
+                    Lam_sym = 0.5 * (Lam + Lam.T)
+                    ew = np.linalg.eigvalsh(Lam_sym)
                     lam_min = float(max(np.min(ew), 1e-12))
                     lam_max = float(max(np.max(ew), lam_min))
                     condL   = lam_max / lam_min
 
-                    print(f"\n[DBG {arm}] t={i*dt:5.2f}s  (J: WORLD axes | ω_meas: WORLD & BASE | ω_pred: Jq̇ WORLD)")
-                    print(f"  |r|_left  (WORLD) = {np.linalg.norm(r_left):.3f}   r_left  = {np.round(r_left, 3)}")
-                    print(f"  |r|_right (BODY)  = {np.linalg.norm(r_right):.3f}  r_right = {np.round(r_right, 3)}")
-                    print(f"  ω_meas_W         = {np.round(w_meas_W, 3)}")
-                    print(f"  ω_pred_Jq̇_W     = {np.round(w_pred_W, 3)}   ‖Δ‖ = {np.linalg.norm(w_meas_W - w_pred_W):.3e}")
-                    print(f"  ω_meas_BASE      = {np.round(w_meas_BASE, 3)}   (UR base frame)")
-                    print(f"  ω_fd1_W(rotvec)  = {np.round(w_fd1_W, 3)}")
-                    print(f"  ω_fd2_W(logmap)  = {np.round(w_fd2_W, 3)}")
-                    print(f"  Λ eig[min,max]   = [{lam_min:.3e}, {lam_max:.3e}]   cond(Λ) = {condL:.2e}")
+                    # 4. Wrench & Acceleration Breakdown
+                    # The wrench F_des and desired accel a_des are in the same TASK FRAME (WORLD-aligned)
+                    
+                    # Wrench terms
+                    F_damping = D @ Xd_err
+                    F_stiffness = K @ X_err
+                    F_des_check = F_damping + F_stiffness
+                    
+                    # Acceleration Check (a_des = Lam^-1 * F_des)
+                    a_des_v = a_des[:3] # Desired Linear Acceleration
+                    a_des_w = a_des[3:] # Desired Angular Acceleration
 
-                    # update prevs
+                    print(f"\n[DBG {arm}] t={i*dt:5.2f}s  Task Frame: WORLD-Aligned")
+                    print("--- 1. KINEMATIC & STATE CONSISTENCY (WORLD FRAME) ---")
+                    print(f"  Linear Speed Diff ‖Δv‖ = {np.linalg.norm(v_meas_W - v_pred_W):.3e} (meas={np.round(v_meas_W, 2)} | pred={np.round(v_pred_W, 2)})")
+                    print(f"  Angular Speed Diff ‖Δω‖ = {np.linalg.norm(w_meas_W - w_pred_W):.3e} (meas={np.round(w_meas_W, 2)} | pred={np.round(w_pred_W, 2)})")
+                    print(f"  J is FINITE: {np.isfinite(J).all()} | Jdot is FINITE: {np.isfinite(Jdot).all()} | qdot is FINITE: {np.isfinite(qdot).all()}")
+                    
+                    print("\n--- 2. INERTIA (Λ) HEALTH ---")
+                    print(f"  Λ eig[min,max]   = [{lam_min:.3e}, {lam_max:.3e}] | cond(Λ) = {condL:.2e}")
+                    print(f"  Λ/D/K FINITE: {is_finite(Lam, D, K)}")
+                    
+                    print("\n--- 3. WRENCH & ACCELERATION BREAKDOWN (TASK FRAME) ---")
+                    print(f"  FORCE (Stiffness) ‖F_K‖ = {np.linalg.norm(F_stiffness[:3]):.3f} | TORQUE ‖τ_K‖ = {np.linalg.norm(F_stiffness[3:]):.3f}")
+                    print(f"  FORCE (Damping)   ‖F_D‖ = {np.linalg.norm(F_damping[:3]):.3f} | TORQUE ‖τ_D‖ = {np.linalg.norm(F_damping[3:]):.3f}")
+                    print(f"  Wrench Match ‖F_des - F_check‖ = {np.linalg.norm(f_des - F_des_check):.3e} (Should be near zero)")
+                    print(f"  Desired Accel (Linear) ‖a_v‖ = {np.linalg.norm(a_des_v):.3f} | (Angular) ‖a_ω‖ = {np.linalg.norm(a_des_w):.3f}")
+                    print(f"  a_des FINITE: {np.isfinite(a_des).all()}")
+                    
+                    print("\n--- 4. ERRORS (TASK FRAME) ---")
+                    # Note: e_r (rotational error) is the left-invariant error used in the QP
+                    print(f"  Position Error ‖e_p‖ = {np.linalg.norm(e_p):.3e} (m)")
+                    print(f"  Rotation Error ‖e_r‖ = {np.linalg.norm(e_r):.3e} (rad)")
+
+                    # update prevs (just to keep the old finite-diff logic if you wanted it later)
+                    if not hasattr(self, "_dbg_prev_R"): self._dbg_prev_R = R
+                    if not hasattr(self, "_dbg_prev_r"): self._dbg_prev_r = RR.from_matrix(R).as_rotvec()
                     self._dbg_prev_R = R
                     self._dbg_prev_r = RR.from_matrix(R).as_rotvec()
                 # ---------------------------------------------------------------------------
@@ -675,22 +716,22 @@ class SingleArmImpedanceQP:
 
 if __name__ == "__main__":
     # impedance gains (tune rotation lower)
-    K = np.diag([400, 400, 400, 20, 20, 20])
+    K = np.diag([100, 100, 100, 2, 2, 2])
     robot = URImpedanceController("192.168.1.33", K=K)
 
     # diagonal task weighting
-    W_imp = diag6([5e4, 5e4, 5e4, 0, 0, 0])
+    W_imp = diag6([1e3, 1e3, 1e3, 1e2, 1e2, 1e2])
 
-    traj_path = "motion_planner/trajectories/pick_and_place.npz"
-    Hz = 75
+    traj_path = "motion_planner/trajectories_old/lift_100.npz"
+    Hz = 40
 
     ctrl = SingleArmImpedanceQP(
         robot=robot,
         Hz=Hz,
         trajectory_npz_path=traj_path,
         W_imp=W_imp,
-        lambda_reg=5e-15,        # regularization on qdd
-        tikhonov_lambda=1e-1,   # Λ regularization
+        lambda_reg=5e-8,        # regularization on qdd
+        tikhonov_lambda=1e-4,   # Λ regularization
     )
 
     try:
