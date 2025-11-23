@@ -8,7 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from control.ur_controller import URController
+from control.UR.ur_controller import URController
 from scipy.spatial.transform import Rotation as R
 from utils.utils import (
     rotmat_to_rvec,

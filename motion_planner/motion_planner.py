@@ -902,6 +902,173 @@ class MotionPlanner:
 
         return traj
 
+    def circular_xz(
+        self,
+        start_pose: np.ndarray,
+        dt: float,
+        radius: float = None,
+        diameter: float = None,
+        max_velocity: float = None,      # along arc, m/s
+        max_acceleration: float = None,  # along arc, m/s^2
+        keep_orientation: bool = True,
+        ccw: bool = True,
+        label: str = "circular_xz"
+    ) -> "Trajectory":
+        """
+        Generate a full 360° circular trajectory in the XZ plane at start_pose.y.
+        Center is at start_position - [radius, 0, 0] (world X), so we begin
+        on the circle at theta=0.
+
+        Timing uses trapezoidal profile on arc-length 's' with v_max/a_max.
+        """
+        # Resolve radius
+        if radius is None and diameter is None:
+            raise ValueError("Provide either radius or diameter")
+        if radius is None:
+            radius = diameter * 0.5
+        if radius <= 0:
+            raise ValueError("radius must be > 0")
+
+        # Extract start position/orientation
+        p0 = start_pose[:3, 3].copy()
+        R0 = start_pose[:3, :3].copy()
+
+        # Circle center: shift along world +X, same Y, same Z-center
+        center = p0.copy()
+        center[0] -= radius  # x center
+        # center[1] = p0[1]   # y fixed
+        # center[2] = p0[2]   # z center
+
+        # Geometry & travel
+        s_total = 2.0 * np.pi * radius  # arc length for 360°
+        if max_velocity and max_acceleration and max_velocity > 0 and max_acceleration > 0:
+            t_accel = max_velocity / max_acceleration
+            s_accel = 0.5 * max_acceleration * t_accel**2
+
+            if s_total <= 2 * s_accel:
+                # Triangular profile
+                t_accel = np.sqrt(s_total / max_acceleration)
+                T = 2 * t_accel
+                v_peak = max_acceleration * t_accel
+            else:
+                s_const = s_total - 2 * s_accel
+                t_const = s_const / max_velocity
+                T = 2 * t_accel + t_const
+                v_peak = max_velocity
+        elif max_velocity and max_velocity > 0:
+            # Constant speed
+            T = s_total / max_velocity
+            v_peak = max_velocity
+            max_acceleration = None
+        else:
+            # Fallback
+            num_steps = max(1, int(s_total / dt / 1.0))
+            T = num_steps * dt
+            v_peak = s_total / T if T > 0 else 0.0
+
+        params = {
+            "type": "circle_xz",
+            "center": center.tolist(),
+            "radius": radius,
+            "dt": dt,
+            "time": T,
+            "max_velocity": max_velocity,
+            "max_acceleration": max_acceleration,
+            "keep_orientation": keep_orientation,
+            "ccw": ccw,
+        }
+        traj = Trajectory(label, params)
+
+        num_steps = int(T / dt)
+        dir_sign = 1.0 if ccw else -1.0
+
+        def arc_profile(t: float):
+            if max_acceleration and v_peak and T:
+                t_acc = v_peak / max_acceleration
+                s_acc = 0.5 * max_acceleration * t_acc**2
+
+                if T <= 2 * t_acc + 1e-9:
+                    # Triangular
+                    t_acc = T * 0.5
+                    if t <= t_acc:
+                        s = 0.5 * max_acceleration * t**2
+                        s_dot = max_acceleration * t
+                        s_ddot = max_acceleration
+                    else:
+                        td = T - t
+                        s = s_total - 0.5 * max_acceleration * td**2
+                        s_dot = max_acceleration * td
+                        s_ddot = -max_acceleration
+                else:
+                    t_const = T - 2 * t_acc
+                    if t <= t_acc:
+                        s = 0.5 * max_acceleration * t**2
+                        s_dot = max_acceleration * t
+                        s_ddot = max_acceleration
+                    elif t <= t_acc + t_const:
+                        s = s_acc + v_peak * (t - t_acc)
+                        s_dot = v_peak
+                        s_ddot = 0.0
+                    else:
+                        td = T - t
+                        s = s_total - 0.5 * max_acceleration * td**2
+                        s_dot = max_acceleration * td
+                        s_ddot = -max_acceleration
+            else:
+                # Constant speed
+                s = (s_total / T) * t if T > 0 else 0.0
+                s_dot = s_total / T if T > 0 else 0.0
+                s_ddot = 0.0
+            return s, s_dot, s_ddot
+
+        for i in range(num_steps + 1):
+            t = min(i * dt, T)
+            s, s_dot, s_ddot = arc_profile(t)
+
+            theta = dir_sign * (s / radius)
+            theta_dot = dir_sign * (s_dot / radius)
+            theta_ddot = dir_sign * (s_ddot / radius)
+
+            c = np.cos(theta)
+            s_ = np.sin(theta)
+
+            # XZ circle at fixed y = p0[1]
+            x = center[0] + radius * c
+            y = p0[1]
+            z = center[2] + radius * s_
+            position = np.array([x, y, z])
+
+            # Vel/acc in XZ plane
+            vx = -radius * s_ * theta_dot
+            vz =  radius * c  * theta_dot
+            ax = -radius * c  * (theta_dot**2) - radius * s_ * theta_ddot
+            az = -radius * s_ * (theta_dot**2) + radius * c  * theta_ddot
+
+            linear_velocity = np.array([vx, 0.0, vz])
+            linear_acceleration = np.array([ax, 0.0, az])
+
+            if keep_orientation:
+                R = R0
+            else:
+                # For now we won't use this branch (no rotations), but keep it for later.
+                R = R0
+
+            angular_velocity = np.zeros(3)
+            angular_acceleration = np.zeros(3)
+
+            traj.add_waypoint(
+                position=position,
+                rotation=R,
+                linear_velocity=linear_velocity,
+                angular_velocity=angular_velocity,
+                linear_acceleration=linear_acceleration,
+                angular_acceleration=angular_acceleration,
+                index=i,
+                time=t,
+            )
+
+        return traj
+    
     def concatenate_trajectories(self, trajectories: List[Trajectory]) -> Trajectory:
         """Concatenate multiple trajectories into one continuous trajectory"""
         if not trajectories:
@@ -1055,10 +1222,133 @@ if __name__ == "__main__":
         label="circle_xy_ccw"
     )
 
+    # Helper to build poses from position + euler (deg)
+    def make_pose(pos, euler_deg):
+        R = Rotation.from_euler("xyz", np.deg2rad(euler_deg)).as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = np.array(pos)
+        return T
 
+    pose_down = make_pose([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+    pose_up   = make_pose([0.0, 0.0, 0.2], [0.0, 0.0, 0.0])
 
+    offset = 0.05
 
-    full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
+    # A few intermediate poses (no rotation, just position)
+    pose_xy_1 = make_pose([ 0.15 ,  0.05, 0.4], [0.0, 0.0, 0.30])  # up & diagonal
+    pose_xy_2 = make_pose([-0.20 ,  0.00, 0.30], [0.0, 0.0, -0.30])  # other side
+    pose_xz_1 = make_pose([ 0, -0.1, 0.35], [0.0, 0.0, 0.0])  # for XZ circle
+    pose_mid  = make_pose([-0.1, -0.05, 0.05], [0.0, 0.0, 0.0])  # back towards center
+
+    hz = 100.0
+    dt = 1.0 / hz
+
+    # 1) Lift up from table (moderate speed)
+    seg_lift = planner.linear(
+        start_pose=pose_down,
+        end_pose=pose_up,
+        dt=dt,
+        max_velocity=0.20,
+        max_acceleration=0.40,
+    )
+    hold_up = planner.hold(pose_up, duration=0.5, dt=dt)
+
+    # 2) Move diagonally in XY and up in Z
+    seg_1 = planner.linear(
+        start_pose=pose_up,
+        end_pose=pose_xy_1,
+        dt=dt,
+        max_velocity=0.30,
+        max_acceleration=0.60,
+    )
+
+    # 3) Fast XY-plane circle around pose_xy_1
+    circle_xy = planner.circular(
+        start_pose=pose_xy_1,
+        dt=dt,
+        radius=0.15,
+        max_velocity=0.35,       # faster
+        max_acceleration=0.70,
+        keep_orientation=True,   # keep identity rotation
+        ccw=True,
+        label="circle_xy_fast",
+    )
+
+    # 4) Linear move to another pose
+    seg_2 = planner.linear(
+        start_pose=pose_xy_1,
+        end_pose=pose_xy_2,
+        dt=dt,
+        max_velocity=0.25,
+        max_acceleration=0.50,
+    )
+
+    # 5) Move upward & sideways to prepare for XZ circle
+    seg_3 = planner.linear(
+        start_pose=pose_xy_2,
+        end_pose=pose_xz_1,
+        dt=dt,
+        max_velocity=0.30,
+        max_acceleration=0.60,
+    )
+
+    # 6) XZ-plane circle (slightly slower, opposite direction)
+    circle_xz = planner.circular_xz(
+        start_pose=pose_xz_1,
+        dt=dt,
+        radius=0.15,
+        max_velocity=0.25,
+        max_acceleration=0.50,
+        keep_orientation=True,   # still no rotations
+        ccw=False,
+        label="circle_xz_slow",
+    )
+
+    # 7) Come back towards center-ish
+    seg_4 = planner.linear(
+        start_pose=pose_xz_1,
+        end_pose=pose_mid,
+        dt=dt,
+        max_velocity=0.30,
+        max_acceleration=0.60,
+    )
+
+    # 8) Go back to the lifted pose above the start
+    seg_5 = planner.linear(
+        start_pose=pose_mid,
+        end_pose=pose_up,
+        dt=dt,
+        max_velocity=0.20,
+        max_acceleration=0.40,
+    )
+
+    # 9) Finally go back down to the exact starting pose
+    seg_down = planner.linear(
+        start_pose=pose_up,
+        end_pose=pose_down,
+        dt=dt,
+        max_velocity=0.15,
+        max_acceleration=0.30,
+    )
+
+    # Concatenate everything into one stress-test trajectory
+    full_trajectory = planner.concatenate_trajectories(
+        [
+            seg_lift,
+            hold_up,
+            seg_1,
+            circle_xy,
+            seg_2,
+            seg_3,
+            circle_xz,
+            seg_4,
+            seg_5,
+            seg_down,
+        ]
+    )
+
+    #full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
     # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
     # full_trajectory = planner.concatenate_trajectories([up, circle, down]) #circle
     #full_trajectory = planner.concatenate_trajectories([up, twist]) #twist
@@ -1073,4 +1363,4 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/side_y_fast.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories/trajectory_3d_stress_test.npz")
