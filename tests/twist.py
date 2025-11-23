@@ -1,4 +1,4 @@
-from control.pid_controller import URForceController
+from control.PID.pid_controller import URForceController
 import numpy as np
 import time
 

@@ -62,6 +62,7 @@ class URController(threading.Thread):
         self.R_r2w = self.R_r2w @ np.array([[-1, 0, 0],
                                             [ 0,-1, 0],
                                             [ 0, 0, 1]])
+
         self.t_r2w = self.T_r2w[:3, 3] # +  np.array([0.00, -0.05753, -0.10]) #offset from tcp to my gripper. 3x1
 
 
@@ -307,7 +308,7 @@ class URController(threading.Thread):
 
     def speedJ(self, joint_speed, dt):
         command = lambda: self.rtde_control.speedJ(
-            joint_speed, self.default_joint_acceleration, dt
+            joint_speed, self.default_joint_acceleration, dt*4
         )
         self.command_queue.put(command)
 
@@ -374,6 +375,79 @@ class URController(threading.Thread):
             "filtered_force_world": filtered_force_world,
             "gripper_world": gripper_world,
         }
+    
+    def get_state2(self):
+        """Get robot state with correct world-frame pose/velocity (handles flipped URDF and EE offset)."""
+
+        # --- Raw readings from UR RTDE ---
+        pose_robot_base = np.array(self.rtde_receive.getActualTCPPose())
+        force_robot_base = np.array(self.rtde_receive.getActualTCPForce())
+        speed_robot_base = np.array(self.rtde_receive.getActualTCPSpeed())
+        joints = self.rtde_receive.getActualQ()
+
+        # --- Transform to world frame ---
+        R_r2w = self.robot_config[:3, :3]
+        t_r2w = self.robot_config[:3, 3]
+
+        # TCP pose in world
+        p_r_tcp = pose_robot_base[:3]
+        R_r_tcp = rvec_to_rotmat(pose_robot_base[3:])
+        p_w_tcp = R_r2w @ p_r_tcp + t_r2w
+        R_w_tcp = R_r2w @ R_r_tcp
+        pose_world = np.hstack([p_w_tcp, rotmat_to_rvec(R_w_tcp)])
+
+        # TCP twist in world
+        v_r_tcp = speed_robot_base[:3]
+        w_r_tcp = speed_robot_base[3:]
+        v_w_tcp = R_r2w @ v_r_tcp
+        w_w_tcp = R_r2w @ w_r_tcp
+        speed_world = np.hstack([v_w_tcp, w_w_tcp])
+
+        # --- Correct EE marker offset (rotated!) ---
+        # offset in TCP frame
+        if self.ip == "192.168.1.66":   # right
+            r_tcp_to_marker = np.array([0.00,  0.05753, -0.10])
+        else:                           # left
+            r_tcp_to_marker = np.array([0.00, -0.05753, -0.10])
+
+        # marker pose in world
+        p_w_marker = p_w_tcp + R_w_tcp @ r_tcp_to_marker
+        rvec_w_marker = rotmat_to_rvec(R_w_tcp)
+        gripper_world = np.hstack([p_w_marker, rvec_w_marker])
+
+        # marker velocity in world (v_marker = v_tcp + ω × (R * r))
+        v_w_marker = v_w_tcp + np.cross(w_w_tcp, R_w_tcp @ r_tcp_to_marker)
+        speed_world_marker = np.hstack([v_w_marker, w_w_tcp])
+
+        # --- Forces to world ---
+        f_r_tcp = force_robot_base[:3]
+        tau_r_tcp = force_robot_base[3:]
+        f_w_tcp = R_r2w @ f_r_tcp
+        tau_w_tcp = R_r2w @ tau_r_tcp
+        force_world = np.hstack([f_w_tcp, tau_w_tcp])
+
+        # --- Simple low-pass filter ---
+        filtered_force = self.force_low_pass_filter(self.previous_force, force_robot_base, self.alpha)
+        self.previous_force = filtered_force
+
+        filtered_force_world = self.force_low_pass_filter(self.previous_force_world, f_w_tcp, self.alpha)
+        self.previous_force_world = filtered_force_world
+
+        # --- Package everything ---
+        return {
+            "pose": pose_robot_base,                     # TCP in robot base
+            "pose_world": pose_world,                    # TCP in world
+            "gripper_world": gripper_world,              # marker in world
+            "speed": speed_robot_base,                   # TCP twist in robot base
+            "speed_world": speed_world,                  # TCP twist in world
+            "speed_world_marker": speed_world_marker,    # marker twist in world
+            "force": force_robot_base,
+            "force_world": force_world,
+            "filtered_force": filtered_force,
+            "filtered_force_world": filtered_force_world,
+            "joints": joints,
+        }
+
 
     def is_moving(self):
         speeds = self.rtde_receive.getActualTCPSpeed()

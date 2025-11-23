@@ -13,21 +13,21 @@ if __name__ == "__main__":
     ki_f = 0.0000 * factor
     kd_f = 0.005 * factor
 
-    kp_p = 1.1  # 0.5
+    kp_p = 2  # 0.5
     ki_p = 0.00005
-    kd_p = 0.08  # 0.0025
+    kd_p = 0.75  # 0.0025
 
-    kp_r = 0
+    kp_r = 1.8
     ki_r = 0
-    kd_r = 0
+    kd_r = 0.2
 
-    Kp_p = 0.4
+    Kp_p = 0.8
     Ki_p = 0
-    Kd_p = 0.05
+    Kd_p = 0.15
 
     alpha = 0.85
     deadzone_threshold = 0.02
-    trajectory = "motion_planner/trajectories/rectangular_fast.npz"
+    trajectory = "motion_planner/trajectories/trajectory_3d_stress_test.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -117,6 +117,7 @@ if __name__ == "__main__":
 
         robotR.plot_data3D()
         robotL.plot_data3D()
+
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

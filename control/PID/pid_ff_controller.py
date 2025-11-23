@@ -302,9 +302,9 @@ class URForceController(URController):
                         base_force = 12.5
                         factor = base_force / reference_force
 
-                        kp_f = 0.0038 * factor
+                        kp_f = 0.003 * factor
                         ki_f = 0.0000 * factor
-                        kd_f = 0.0025 * factor
+                        kd_f = 0.0015 * factor
                         self.force_pid.update_weights(kp=kp_f, ki=ki_f, kd=kd_f)
 
                 state = self.get_state()

@@ -72,20 +72,45 @@ class URImpedanceController(URForceController):
         M = pin.crba(self.pin_model, self.pin_data, q)
         return np.asarray(0.5 * (M + M.T))
 
-    def get_Lambda(self, J, M, lam2_base=1e-5, cond_ref=1e5):
-        # damped operational-space "inverse inertia"
-        Minv = np.linalg.inv(M)
-        A = J @ Minv @ J.T
-        A = 0.5 * (A + A.T)
-        w, V = np.linalg.eigh(A)
-        w = np.clip(w, 0.0, None)
-        wmin = float(np.min(w)) if w.size else 0.0
-        wmax = float(np.max(w)) if w.size else 0.0
-        condA = (wmax / max(wmin, 1e-12)) if wmax > 0 else 1.0
-        lam2 = lam2_base * max(1.0, condA / cond_ref)
-        winv_damped = w / (w * w + lam2)
-        Lam = (V * winv_damped) @ V.T
-        return 0.5 * (Lam + Lam.T)
+    # def get_Lambda(self, J, M, lam2_base=1e-5, cond_ref=5):
+    #     # damped operational-space "inverse inertia"
+    #     Minv = np.linalg.inv(M)
+    #     A = J @ Minv @ J.T
+    #     A = 0.5 * (A + A.T)
+    #     w, V = np.linalg.eigh(A)
+    #     w = np.clip(w, 1e-6, 1e6)
+    #     wmin = float(np.min(w)) if w.size else 0.0
+    #     wmax = float(np.max(w)) if w.size else 0.0
+    #     condA = (wmax / max(wmin, 1e-12)) if wmax > 0 else 1.0
+    #     lam2 = lam2_base * max(1.0, condA / cond_ref)
+    #     winv_damped = w / (w * w + lam2)
+    #     Lam = (V * winv_damped) @ V.T
+    #     return 0.5 * (Lam + Lam.T)
+
+    def get_Lambda(self, J, M,  regularization: float = 1e-10):
+        try:
+            # Check shapes
+            if M.shape[0] != M.shape[1]:
+                raise ValueError("M_i must be a square matrix.")
+            if J.shape[1] != M.shape[0]:
+                raise ValueError("J_i and M_i dimensions do not align.")
+
+            # Compute M_i inverse safely
+            M_inv = np.linalg.pinv(M)  # pseudoinverse is safer than inv
+
+            # Compute the intermediate matrix
+            inner = J @ M_inv @ J.T
+
+            # Add a small regularization term to ensure invertibility
+            inner_reg = inner + regularization * np.eye(inner.shape[0])
+
+            # Compute the final inverse
+            Lambda_i = np.linalg.pinv(inner_reg)
+            return Lambda_i
+
+        except np.linalg.LinAlgError as e:
+            raise RuntimeError(f"Matrix inversion failed: {e}")
+
 
     def get_D(self, K, Lambda):
         S_L = sqrtm(Lambda)
@@ -113,7 +138,7 @@ class DualArmImpedanceAdmittanceQP:
     """
 
     def __init__(self, robotL: URImpedanceController, robotR: URImpedanceController, Hz: int,
-                 W_imp=None, W_grasp=None, lam_reg: float = 1e-8,
+                 W_imp=None, W_grasp=None, w_post=None, lam_reg: float = 1e-8, S_mask=None, k_post=None,
                  admittance_gain: float = 3e-4, v_max: float = 0.05,
                  F_n_star: float = 20.0,
                  trajectory_path: str | None = None,
@@ -125,6 +150,9 @@ class DualArmImpedanceAdmittanceQP:
         self.W_imp_np = np.asarray(W_imp, dtype=float)
         self.W_grasp_np = np.asarray(W_grasp, dtype=float)
         self.lam_reg = float(lam_reg)
+        self.w_post_np = float(w_post)
+        self.k_post_np = float(k_post)
+        self.S_mask = np.asarray(S_mask, dtype=float)
 
         # admittance params
         self.k_f = float(admittance_gain)
@@ -211,11 +239,18 @@ class DualArmImpedanceAdmittanceQP:
     # QP build
     # ---------------------------------------------------------
     def build_qp(self, dt):
+        """
+        QP build including optional posture task regularization.
+        Keeps the same impedance + grasping formulation, but adds a weak
+        joint-space "posture" term to stabilize the configuration and prevent drift.
+        """
         n = 6
         self.qddot_L = cp.Variable(n, name="qddot_L")
         self.qddot_R = cp.Variable(n, name="qddot_R")
 
-        # parameters (updated each loop)
+        # ===============================================================
+        # Parameters (updated each loop)
+        # ===============================================================
         self.J_L_p = cp.Parameter((6, n), name="J_L")
         self.Jdot_L_p = cp.Parameter((6, n), name="Jdot_L")
         self.qdot_L_p = cp.Parameter(n, name="qdot_L")
@@ -236,13 +271,31 @@ class DualArmImpedanceAdmittanceQP:
         self.dt_c = cp.Constant(float(dt))
         self.dt2_c = cp.Constant(float(0.5 * dt * dt))
 
-        # Next-step joint states
+        # ===============================================================
+        # Posture task (new)
+        # ===============================================================
+        self.q_post_L_p    = cp.Parameter(n, name="q_post_L")
+        self.qdot_post_L_p = cp.Parameter(n, name="qdot_post_L")
+        self.q_post_R_p    = cp.Parameter(n, name="q_post_R")
+        self.qdot_post_R_p = cp.Parameter(n, name="qdot_post_R")
+
+        self.S_post_L = cp.Parameter((n, n), name="S_post_L")
+        self.S_post_R = cp.Parameter((n, n), name="S_post_R")
+
+        self.k_post  = cp.Constant(self.k_post_np)    # posture "stiffness" gain
+        self.w_post = cp.Constant(self.w_post_np)   # posture cost weight (small)
+
+        # ===============================================================
+        # State update expressions
+        # ===============================================================
         qdot_next_L = self.qdot_L_p + self.qddot_L * self.dt_c
         qdot_next_R = self.qdot_R_p + self.qddot_R * self.dt_c
         q_next_L = self.q_L_p + self.qdot_L_p * self.dt_c + self.qddot_L * self.dt2_c
         q_next_R = self.q_R_p + self.qdot_R_p * self.dt_c + self.qddot_R * self.dt2_c
 
-        # Task-space errors
+        # ===============================================================
+        # Task-space impedance and grasping errors
+        # ===============================================================
         e_imp_L = self.J_L_p @ self.qddot_L + self.Jdot_L_p @ self.qdot_L_p - self.xddot_des_L_p
         e_imp_R = self.J_R_p @ self.qddot_R + self.Jdot_R_p @ self.qdot_R_p - self.xddot_des_R_p
 
@@ -251,16 +304,44 @@ class DualArmImpedanceAdmittanceQP:
         e_grasp_L = xdot_next_L - self.xdot_des_L_p
         e_grasp_R = xdot_next_R - self.xdot_des_R_p
 
-        obj_L = cp.sum_squares(self.W_imp_c @ e_imp_L) + cp.sum_squares(self.W_grasp_c @ e_grasp_L) \
-              + self.lam_reg * cp.sum_squares(self.qddot_L)
-        obj_R = cp.sum_squares(self.W_imp_c @ e_imp_R) + cp.sum_squares(self.W_grasp_c @ e_grasp_R) \
-              + self.lam_reg * cp.sum_squares(self.qddot_R)
+        # ===============================================================
+        # Posture task errors
+        # ===============================================================
+        # β = 2√k (q̇*_post − q̇) + k (q*_post − q)
+        beta_L = 2.0 * cp.sqrt(self.k_post) * (self.qdot_post_L_p - self.qdot_L_p) \
+                + self.k_post * (self.q_post_L_p - self.q_L_p)
+        beta_R = 2.0 * cp.sqrt(self.k_post) * (self.qdot_post_R_p - self.qdot_R_p) \
+                + self.k_post * (self.q_post_R_p - self.q_R_p)
+
+        e_post_L = self.S_post_L @ self.qddot_L - beta_L
+        e_post_R = self.S_post_R @ self.qddot_R - beta_R
+
+        # ===============================================================
+        # Objective
+        # ===============================================================
+        obj_L = (
+            cp.sum_squares(self.W_imp_c @ e_imp_L)
+            + cp.sum_squares(self.W_grasp_c @ e_grasp_L)
+            + self.lam_reg * cp.sum_squares(self.qddot_L)
+            + self.w_post * cp.sum_squares(e_post_L)     # posture regularization
+        )
+
+        obj_R = (
+            cp.sum_squares(self.W_imp_c @ e_imp_R)
+            + cp.sum_squares(self.W_grasp_c @ e_grasp_R)
+            + self.lam_reg * cp.sum_squares(self.qddot_R)
+            + self.w_post * cp.sum_squares(e_post_R)
+        )
+
         obj = obj_L + obj_R
 
-        # constraints
+        # ===============================================================
+        # Constraints
+        # ===============================================================
         q_pos_lim = self.joint_pose_limit
         q_vel_lim = self.joint_speed_limit
         q_acc_lim = self.joint_accel_limit
+
         cons = [
             -q_pos_lim <= q_next_L, q_next_L <= q_pos_lim,
             -q_pos_lim <= q_next_R, q_next_R <= q_pos_lim,
@@ -270,12 +351,15 @@ class DualArmImpedanceAdmittanceQP:
             -q_acc_lim <= self.qddot_R, self.qddot_R <= q_acc_lim,
         ]
 
+        # ===============================================================
+        # Build QP
+        # ===============================================================
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         self.qp_kwargs = dict(
-            eps_abs=3e-6,
-            eps_rel=3e-6,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
             alpha=1.6,
-            max_iter=12000,
+            max_iter=5000,
             adaptive_rho=True,
             adaptive_rho_interval=45,
             polish=True,
@@ -283,12 +367,13 @@ class DualArmImpedanceAdmittanceQP:
             warm_start=True,
         )
 
+
     # ---------------------------------------------------------
     # Main control loop
     # ---------------------------------------------------------
-    def run(self, timeout_s: float | None = None, auto_plot: bool = True):
+    def run(self, timeout_s: float | None = None):
         """
-        If timeout_s is given, stop after that many seconds and auto-plot (if enabled).
+        If timeout_s is given, stop after that many seconds.
         First ref_start_delay_s seconds: pure grasping (admittance only).
         After that: use trajectory references initialized from current TCPs.
         """
@@ -297,6 +382,8 @@ class DualArmImpedanceAdmittanceQP:
         time.sleep(0.1)
 
         dt = 1.0 / self.Hz
+        next_tick = time.perf_counter()
+        last_tick = next_tick
         self.build_qp(dt)
         self.control_stop = threading.Event()
         i = 0
@@ -307,15 +394,38 @@ class DualArmImpedanceAdmittanceQP:
 
         self._ctrl_start_wall = time.perf_counter()
         self._last_log_wall = self._ctrl_start_wall
-        print(f"[COMBINED QP] start | F*_n={self.F_n_star} N, k_f={self.k_f}, v_max={self.v_max} | "
-              f"traj={'yes' if self.traj_len>0 else 'no'} delay={self.ref_start_delay_s:.2f}s")
 
         # prepare integrated q_cmd traces for plotting
         self._qcmd_L = self.robotL.get_q().copy()
         self._qcmd_R = self.robotR.get_q().copy()
 
+        # --- posture reference setup ---
+        qL0 = self.robotL.get_q().copy()
+        qR0 = self.robotR.get_q().copy()
+
+        # desired posture = home joints, zero velocity
+        self.q_post_L = self.robotL.home_joints
+        self.qdot_post_L = np.zeros_like(qL0)
+        self.q_post_R = self.robotR.home_joints
+        self.qdot_post_R = np.zeros_like(qR0)
+
+        # select which joints to stabilize (1=on, 0=off)
+        self.S_post_L.value = self.S_mask
+        self.S_post_R.value = self.S_mask
+
+        # set posture parameters once (they are constant targets here)
+        self.q_post_L_p.value = self.q_post_L
+        self.qdot_post_L_p.value = self.qdot_post_L
+        self.q_post_R_p.value = self.q_post_R
+        self.qdot_post_R_p.value = self.qdot_post_R
+
+
         try:
             while not self.control_stop.is_set():
+                now = time.perf_counter()
+                dt_real = now - last_tick
+                last_tick = now
+
                 loop_t0 = time.perf_counter()
                 elapsed_total = loop_t0 - self._ctrl_start_wall
 
@@ -360,8 +470,9 @@ class DualArmImpedanceAdmittanceQP:
                 w_R = np.array(state_R["speed_world"][3:6])
                 R_cur_R = R_R
 
-                # ---------- References (your format, after delay) ----------
+                # ---------- References (trajectory after delay) ----------
                 if (self.traj_len > 0) and (elapsed_total >= self.ref_start_delay_s):
+                    trajectory_started = True
                     t_idx = int(np.clip((elapsed_total - self.ref_start_delay_s) * self.Hz, 0, self.traj_len - 1))
 
                     p_ref_L = self.position_ref_L[t_idx]
@@ -430,8 +541,8 @@ class DualArmImpedanceAdmittanceQP:
                 else:
                     qddL = np.zeros(6); qddR = np.zeros(6)
 
-                qdot_cmd_L = qdL + qddL * dt
-                qdot_cmd_R = qdR + qddR * dt
+                qdot_cmd_L = qdL + qddL * dt_real
+                qdot_cmd_R = qdR + qddR * dt_real
 
                 # ---------- Send ----------
                 self.robotL.speedJ(qdot_cmd_L.tolist(), dt)
@@ -455,9 +566,34 @@ class DualArmImpedanceAdmittanceQP:
                 reg_term = float(self.lam_reg) * (float(qddL @ qddL) + float(qddR @ qddR))
                 obj_total = imp_L_term + imp_R_term + grasp_L_term + grasp_R_term + reg_term
 
+                # ---------- Posture objective values (for logging only) ----------
+                kpos = float(self.k_post.value)
+                S_L_val = np.asarray(self.S_post_L.value)
+                S_R_val = np.asarray(self.S_post_R.value)
+
+                beta_L_val = 2.0 * np.sqrt(kpos) * (self.qdot_post_L - qdL) + kpos * (self.q_post_L - q_L)
+                beta_R_val = 2.0 * np.sqrt(kpos) * (self.qdot_post_R - qdR) + kpos * (self.q_post_R - q_R)
+
+                e_post_L_val = S_L_val @ qddL - beta_L_val
+                e_post_R_val = S_R_val @ qddR - beta_R_val
+
+                post_L_term = float(self.w_post.value) * float(e_post_L_val @ e_post_L_val)
+                post_R_term = float(self.w_post.value) * float(e_post_R_val @ e_post_R_val)
+
+                # raw (unweighted) energies
+                imp_L_raw = float(e_imp_L_val @ e_imp_L_val)
+                imp_R_raw = float(e_imp_R_val @ e_imp_R_val)
+                grasp_L_raw = float(e_grasp_L_val @ e_grasp_L_val)
+                grasp_R_raw = float(e_grasp_R_val @ e_grasp_R_val)
+                post_L_raw = float(e_post_L_val @ e_post_L_val)
+                post_R_raw = float(e_post_R_val @ e_post_R_val)
+
+                obj_total_with_post = obj_total + post_L_term + post_R_term
+
                 # ---------- Per-arm tcp dicts for plotting ----------
                 rvec_L      = RR.from_matrix(R_cur_L).as_rotvec()
                 rvec_ref_L  = RR.from_matrix(R_ref_L).as_rotvec()
+
                 tcp_L = {
                     "p":        p_L, "v": v_L, "w": w_L, "rvec": rvec_L,
                     "p_ref":    p_ref_L, "v_ref": v_ref_L, "w_ref": w_ref_L, "rvec_ref": rvec_ref_L,
@@ -481,15 +617,24 @@ class DualArmImpedanceAdmittanceQP:
                 # ---------- Log ----------
                 self.control_data.append({
                     "t": time.time(), "i": i, "status": self.qp.status,
-                    "obj": obj_total,
+                    "obj": obj_total,                      # original (no posture)
+                    "obj_total_with_post": obj_total_with_post,
                     # forces/admittance
                     "F_n_L": F_n_L, "F_n_R": F_n_R, "F_n_star": self.F_n_star,
                     "v_n_L_star": float(v_n_L_star), "v_n_R_star": float(v_n_R_star),
-                    # objective terms
+                    # objective terms (main part)
                     "obj_break": {
                         "imp_L": imp_L_term, "imp_R": imp_R_term,
                         "grasp_L": grasp_L_term, "grasp_R": grasp_R_term,
                         "reg": reg_term, "total": obj_total,
+                    },
+                    # posture contributions
+                    "post_L_term": post_L_term, "post_R_term": post_R_term,
+                    # raw energies for tuning
+                    "raw_terms": {
+                        "imp_L": imp_L_raw, "imp_R": imp_R_raw,
+                        "grasp_L": grasp_L_raw, "grasp_R": grasp_R_raw,
+                        "post_L": post_L_raw, "post_R": post_R_raw,
                     },
                     # per-arm tcp blobs for plotting
                     "tcp_L": tcp_L,
@@ -514,14 +659,19 @@ class DualArmImpedanceAdmittanceQP:
                     avg_hz = (1.0 / avg_period) if avg_period > 0 else float('nan')
                     avg_solver_ms = (self._win_solver_time / self._win_iters) * 1000.0
                     miss_pct = (100.0 * self._win_deadline_miss / self._win_iters)
-                    print(f"[COMBINED QP] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | miss {miss_pct:4.1f}% | "
-                          f"F_L={F_n_L:6.2f} F_R={F_n_R:6.2f} | obj={obj_total:.3e}")
+
+                    # last obj_total_with_post as a quick scalar metric
+                    print(f"[COMBINED QP] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | "
+                          f"miss {miss_pct:4.1f}% | F_L={F_n_L:6.2f} F_R={F_n_R:6.2f} | "
+                          f"obj_full={obj_total_with_post:.3e}")
+
                     self._win_iters = 0; self._win_loop_time = 0.0; self._win_solver_time = 0.0
                     self._win_deadline_miss = 0; self._last_log_wall = now
 
                 if (t_idx >= self.traj_len - 1) and (self.traj_len > 0):
                     self.robotL.speedStop(); self.robotR.speedStop()
-                    print(f"[COMBINED QP] reached end of trajectory at t={elapsed_total:.2f}s → stopping.")                
+                    print(f"[COMBINED QP] reached end of trajectory at t={elapsed_total:.2f}s → stopping.")
+                    break               
 
                 time.sleep(max(0, dt - elapsed))
                 i += 1
@@ -534,6 +684,61 @@ class DualArmImpedanceAdmittanceQP:
                 pass
             total_time = time.perf_counter() - self._ctrl_start_wall
             print(f"[COMBINED QP SUMMARY] Ran {self._total_iters} iters @ {self._total_iters/max(total_time,1e-9):.1f} Hz")
+
+            if not self.control_data:
+                return
+
+            # mask entries that actually have obj_break
+            mask = [("obj_break" in d) for d in self.control_data]
+            if not any(mask):
+                return
+
+            data = [d for d in self.control_data if "obj_break" in d]
+
+            impL  = np.array([d["obj_break"]["imp_L"]   for d in data])
+            impR  = np.array([d["obj_break"]["imp_R"]   for d in data])
+            grL   = np.array([d["obj_break"]["grasp_L"] for d in data])
+            grR   = np.array([d["obj_break"]["grasp_R"] for d in data])
+            reg   = np.array([d["obj_break"]["reg"]     for d in data])
+            postL = np.array([d.get("post_L_term", 0.0) for d in data])
+            postR = np.array([d.get("post_R_term", 0.0) for d in data])
+
+            total_imp    = np.sum(impL + impR)
+            total_grasp  = np.sum(grL + grR)
+            total_post   = np.sum(postL + postR)
+            total_reg    = np.sum(reg)
+            total_all    = total_imp + total_grasp + total_post + total_reg
+
+            # raw RMS energies (task-space)
+            raw_data = [d for d in self.control_data if "raw_terms" in d]
+            if raw_data:
+                raw_imp  = np.array([d["raw_terms"]["imp_L"] + d["raw_terms"]["imp_R"]
+                                     for d in raw_data])
+                raw_grasp = np.array([d["raw_terms"]["grasp_L"] + d["raw_terms"]["grasp_R"]
+                                      for d in raw_data])
+                raw_post = np.array([d["raw_terms"]["post_L"] + d["raw_terms"]["post_R"]
+                                     for d in raw_data])
+
+                rms_imp   = float(np.sqrt(np.mean(raw_imp)))   if raw_imp.size   > 0 else 0.0
+                rms_grasp = float(np.sqrt(np.mean(raw_grasp))) if raw_grasp.size > 0 else 0.0
+                rms_post  = float(np.sqrt(np.mean(raw_post)))  if raw_post.size  > 0 else 0.0
+            else:
+                rms_imp = rms_grasp = rms_post = 0.0
+
+            def pct(x):
+                return 100.0 * x / total_all if total_all > 0 else 0.0
+
+            print("\n[OBJ DIAGNOSTICS] integrated over run")
+            print(f"  total_impedance = {total_imp:.3e} ({pct(total_imp):5.1f} %)")
+            print(f"  total_grasp     = {total_grasp:.3e} ({pct(total_grasp):5.1f} %)")
+            print(f"  total_posture   = {total_post:.3e} ({pct(total_post):5.1f} %)")
+            print(f"  total_reg       = {total_reg:.3e} ({pct(total_reg):5.1f} %)")
+            print(f"  total_all       = {total_all:.3e}")
+
+            print("  RMS raw (task-space) errors:")
+            print(f"    RMS_imp   ≈ {rms_imp:.3e}")
+            print(f"    RMS_grasp ≈ {rms_grasp:.3e}")
+            print(f"    RMS_post  ≈ {rms_post:.3e}")
 
     # ---------------------------------------------------------
     # Plotting
@@ -761,14 +966,26 @@ class DualArmImpedanceAdmittanceQP:
             print("No obj_break logged; ensure you added the logging after solve.")
             return
 
+        # main components (as before)
         impL  = np.array([d["obj_break"]["imp_L"]   for d in self.control_data if "obj_break" in d])
         impR  = np.array([d["obj_break"]["imp_R"]   for d in self.control_data if "obj_break" in d])
         grL   = np.array([d["obj_break"]["grasp_L"] for d in self.control_data if "obj_break" in d])
         grR   = np.array([d["obj_break"]["grasp_R"] for d in self.control_data if "obj_break" in d])
         reg   = np.array([d["obj_break"]["reg"]     for d in self.control_data if "obj_break" in d])
-        total = np.array([d["obj_break"]["total"]   for d in self.control_data if "obj_break" in d])
+
+        # posture terms (weighted)
+        postL = np.array([d.get("post_L_term", 0.0) for d in self.control_data if "obj_break" in d])
+        postR = np.array([d.get("post_R_term", 0.0) for d in self.control_data if "obj_break" in d])
+
+        # total with posture if available
+        total = np.array([
+            d.get("obj_total_with_post", d["obj_break"]["total"])
+            for d in self.control_data if "obj_break" in d
+        ])
+
         t_obj = t_full[mask]
 
+        # QP status class (unchanged)
         status = [d.get("status", "") for d in self.control_data]
         def classify_status(s):
             s_lower = (s or "").lower()
@@ -782,57 +999,72 @@ class DualArmImpedanceAdmittanceQP:
             return 2
         class_vals = np.array([classify_status(s) for s in status], dtype=float)
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True,
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True,
                                        gridspec_kw={"height_ratios": [3, 2]})
         fig.suptitle(f"{title_prefix}", fontsize=13, y=0.98)
 
-        ax1.plot(t_obj, total, label="total", linewidth=2)
+        # --- Top: objective components (symlog so spikes don't flatten) ---
+        ax1.plot(t_obj, total, label="total (incl posture)", linewidth=2)
         ax1.plot(t_obj, impL,  label="impedance L")
         ax1.plot(t_obj, impR,  label="impedance R")
         ax1.plot(t_obj, grL,   label="grasp L")
         ax1.plot(t_obj, grR,   label="grasp R")
         ax1.plot(t_obj, reg,   label="regularizer")
-        ax1.set_ylabel("objective value"); ax1.grid(True, alpha=0.3); ax1.legend(loc="best", fontsize=8)
-        ax1.set_title("QP objective breakdown", fontsize=11)
+        ax1.plot(t_obj, postL, label="posture L")
+        ax1.plot(t_obj, postR, label="posture R")
 
+        ax1.set_yscale("symlog", linthresh=1e3)
+        ax1.set_ylabel("objective value")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc="best", fontsize=8)
+        ax1.set_title("QP objective breakdown (symlog)", fontsize=11)
+
+        # --- Bottom: QP solve health (same as before) ---
         ax2.step(t_full, class_vals, where="post", linewidth=2, color="black", label="severity")
         ax2.axhspan(-0.5, 0.5,  facecolor="green",  alpha=0.08)
         ax2.axhspan(0.5, 1.5,   facecolor="yellow", alpha=0.10)
         ax2.axhspan(1.5, 2.5,   facecolor="red",    alpha=0.08)
-        ax2.set_yticks([0, 1, 2]); ax2.set_yticklabels(["GOOD", "WARN", "BAD"], fontsize=9)
-        ax2.set_ylim(-0.5, 2.5); ax2.set_xlabel("time [s]"); ax2.set_title("QP solve health", fontsize=11)
+        ax2.set_yticks([0, 1, 2])
+        ax2.set_yticklabels(["GOOD", "WARN", "BAD"], fontsize=9)
+        ax2.set_ylim(-0.5, 2.5)
+        ax2.set_xlabel("time [s]")
+        ax2.set_title("QP solve health", fontsize=11)
         ax2.grid(True, axis="x", alpha=0.3)
 
         ts_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         fname = f"plots/{title_prefix.lower()}_{ts_str}.png"
-        fig.tight_layout(rect=[0, 0, 1, 0.96]); fig.savefig(fname, dpi=150, bbox_inches="tight"); plt.close(fig)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
+        plt.close(fig)
         print(f"Saved: {fname}")
-
 
 # =============================================================
 # Example main
 # =============================================================
 if __name__ == "__main__":
     Hz = 50
-    K_L = np.diag([400, 400, 400, 1, 1, 1])
-    K_R = np.diag([400, 400, 400, 0.1, 0.1, 0.1])
+    K = np.diag([600, 600, 600, 1, 1, 1])
+    S_mask = np.diag([0, 1, 1, 1, 1, 0]).astype(float)
+    k_post  = 50.0    # posture "stiffness" gain
 
-    robotL = URImpedanceController("192.168.1.33", K=K_L)
-    robotR = URImpedanceController("192.168.1.66", K=K_R)
+    robotL = URImpedanceController("192.168.1.33", K=K)
+    robotR = URImpedanceController("192.168.1.66", K=K)
 
     # Weighting matrices
-    W_imp = diag6([4e4, 4e4, 4e4, 2e3, 2e3, 2e3])
+    W_imp = diag6([2e4, 2e4, 2e4, 3e3, 3e3, 3e3])
     W_grasp = diag6([0, 0, 0, 0.0, 0.0, 0.0])
+    w_post = 3e4
+    lam_reg = 1e-1
 
     # Common trajectory (world deltas) → both arms, starts after 3s
     trajectory = "motion_planner/trajectories/lift_100.npz"
 
     ctrl = DualArmImpedanceAdmittanceQP(
         robotL, robotR, Hz=Hz,
-        W_imp=W_imp, W_grasp=W_grasp, lam_reg=1e-8,
+        W_imp=W_imp, W_grasp=W_grasp, w_post=w_post, lam_reg=lam_reg, S_mask=S_mask, k_post=k_post,
         admittance_gain=3e-4, v_max=0.1, F_n_star=25.0,
         trajectory_path=trajectory,   # uses your format & init rule
-        ref_start_delay_s=3.0         # first 3s: grasp only
+        ref_start_delay_s=0        # first 3s: grasp only
     )
 
     try:
