@@ -8,12 +8,12 @@ import time
 from numpy import pi
 from scipy.spatial.transform import Rotation as RR
 # Assuming this module provides the necessary URForceController base class
-from control.PID.pid_ff_controller import URForceController 
+from control.UR.ur_controller import URController
 from scipy.linalg import sqrtm
 import pinocchio as pin
 from rtde_control import RTDEControlInterface # Included for the main execution block
-
-# --- UTILITIES ---
+from rtde_receive import RTDEReceiveInterface
+from scipy.linalg import norm
 
 def rvec_to_rotmat(rvec):
     return RR.from_rotvec(rvec).as_matrix()
@@ -25,7 +25,7 @@ def rotmat_to_rvec(R):
 # BASE CLASS (Your Pinocchio Implementation)
 # ===========================
 
-class URImpedanceController(URForceController):
+class URImpedanceController(URController):
     """
     Thin wrapper to expose kinematics/dynamics via Pinocchio.
     K is the impedance stiffness (6x6, SPD).
@@ -64,7 +64,7 @@ class URImpedanceController(URForceController):
             pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
         # Assumes get_J_world is defined in URForceController or a mixin class it uses
-        return self.get_J_world(J)
+        return self.get_J_world_pin(J)
 
     def get_Jdot_pin(self, q, v):
         if not self.pin_model: return np.zeros((6, 6))
@@ -76,7 +76,7 @@ class URImpedanceController(URForceController):
             pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
         )
         # Assumes get_J_world is defined in URForceController or a mixin class it uses
-        return self.get_J_world(dJ)
+        return self.get_J_world_pin(dJ)
 
     # dynamics (Pinocchio version)
     def get_M_pin(self, q):
@@ -143,49 +143,115 @@ class URDynamicsWrapper(URImpedanceController):
         M = np.array(M_flat, dtype=float).reshape((6, 6))
         return np.asarray(0.5 * (M + M.T))
 
-
     def debug_matrices(self):
-        """Calculates and prints J, Jdot, and M for the current state."""
+        """
+        Calculates and prints the dynamics matrices from two sources:
+        1. RTDE (Robot Kernel - the "measured" truth, J, Jdot, M)
+        2. Pinocchio (Local PC Model - the "nominal" model, J_pin, Jdot_pin, M_pin)
+        
+        The function then prints the absolute error between them.
+        """
         q = self.get_q()
         v = self.get_qdot()
         
-        # Accessing RTDE specific methods directly
+        # Guard clause for RTDE access
         if not hasattr(self, 'rtde_control'):
             print("[FATAL] RTDE Control interface is not initialized.")
             return
 
         try:
-            J = self.get_J(q)
-            Jdot = self.get_Jdot(q, v)
-            M = self.get_M(q)
+            # ----------------------------------------------------
+            # 1. RETRIEVE MATRICES (RTDE vs PINOCCHIO)
+            # ----------------------------------------------------
+            
+            # RTDE (Measured)
+            J_rtde = self.get_J(q)
+            Jdot_rtde = self.get_Jdot(q, v)
+            M_rtde = self.get_M(q)
 
-            # NOTE: Assuming getActualTCPPose() is available in the base class
+            # Pinocchio (Nominal/Local) - Assumed available from parent class
+            J_pin = self.get_J_pin(q)
+            Jdot_pin = self.get_Jdot_pin(q, v)
+            M_pin = self.get_M_pin(q)
+
+
+            # ----------------------------------------------------
+            # 2. CALCULATE ERRORS
+            # ----------------------------------------------------
+            
+            # Error functions
+            def max_abs_error(M1, M2):
+                return np.max(np.abs(M1 - M2))
+            
+            def frobenius_norm(M1, M2):
+                return norm(M1 - M2, 'fro')
+
+            # Error Metrics
+            J_err_max = max_abs_error(J_rtde, J_pin)
+            J_err_norm = frobenius_norm(J_rtde, J_pin)
+            
+            Jdot_err_max = max_abs_error(Jdot_rtde, Jdot_pin)
+            Jdot_err_norm = frobenius_norm(Jdot_rtde, Jdot_pin)
+            
+            M_err_max = max_abs_error(M_rtde, M_pin)
+            M_err_norm = frobenius_norm(M_rtde, M_pin)
+
+
+            # ----------------------------------------------------
+            # 3. PRINT RESULTS
+            # ----------------------------------------------------
+
             current_pose = self.rtde_receive.getActualTCPPose()
 
-            print("\n" + "="*70)
-            print(f" DYNAMICS DEBUG @ Q={np.round(q, 2)} ".center(70))
-            print("="*70)
+            print("\n" + "="*80)
+            print(f" DYNAMICS COMPARISON DEBUG @ Q={np.round(q, 4)} ".center(80))
+            print("="*80)
             print(f"Current TCP Pose (Base Frame): {np.round(current_pose, 4)}")
             print(f"Joint Velocity (Qdot): {np.round(v, 4)}")
             
+            # --- JACOBIAN COMPARISON ---
             print("\n--- 1. JACOBIAN (J) [World Frame] ---")
-            print(f"J Max Abs: {np.max(np.abs(J)):.4f} | J Shape: {J.shape}")
-            print(f"Linear J (Top 3 rows):\n{np.round(J[:3,:], 4)}")
+            print(f"RTDE (Max Abs: {np.max(np.abs(J_rtde)):.4f} | Shape: {J_rtde.shape})")
+            print(f"Linear J (RTDE):\n{np.round(J_rtde[:3,:], 4)}")
             
-            print("\n--- 2. JACOBIAN TIME DERIVATIVE (Jdot) [World Frame] ---")
-            print(f"Jdot Max Abs: {np.max(np.abs(Jdot)):.4e} | Jdot Shape: {Jdot.shape}")
-            print(f"Linear Jdot (Top 3 rows):\n{np.round(Jdot[:3,:], 6)}")
+            print(f"\nPINOCCHIO (Max Abs: {np.max(np.abs(J_pin)):.4f})")
+            print(f"Linear J (PIN):\n{np.round(J_pin[:3,:], 4)}")
+
+            print("\n-- J COMPARISON METRICS --")
+            print(f"MAX ABS ERROR: {J_err_max:.4e}")
+            print(f"FROBENIUS NORM (Total Diff): {J_err_norm:.4e}")
+
+
+            # --- JDOT COMPARISON ---
+            print("\n--- 2. JACOBIAN TIME DERIVATIVE (JDOT) [World Frame] ---")
+            print(f"RTDE (Max Abs: {np.max(np.abs(Jdot_rtde)):.4e} | Shape: {Jdot_rtde.shape})")
+            print(f"Linear Jdot (RTDE):\n{np.round(Jdot_rtde[:3,:], 6)}")
+
+            print(f"\nPINOCCHIO (Max Abs: {np.max(np.abs(Jdot_pin)):.4e})")
+            print(f"Linear Jdot (PIN):\n{np.round(Jdot_pin[:3,:], 6)}")
             
+            print("\n-- JDOT COMPARISON METRICS --")
+            print(f"MAX ABS ERROR: {Jdot_err_max:.4e}")
+            print(f"FROBENIUS NORM (Total Diff): {Jdot_err_norm:.4e}")
+            
+            
+            # --- MASS MATRIX COMPARISON ---
             print("\n--- 3. MASS MATRIX (M) [Joint Space] ---")
-            print(f"M Diagonal: {np.round(M.diagonal(), 4)}")
-            print(f"M Symmetry Check: {np.allclose(M, M.T)} | M Shape: {M.shape}")
-            print(f"M (Top-Left 3x3):\n{np.round(M[:3,:3], 4)}")
-            print("="*70)
+            print(f"RTDE M Diagonal: {np.round(M_rtde.diagonal(), 4)}")
+            print(f"RTDE M (Top-Left 3x3):\n{np.round(M_rtde[:3,:3], 4)}")
+
+            print(f"\nPINOCCHIO M Diagonal: {np.round(M_pin.diagonal(), 4)}")
+            print(f"PINOCCHIO M (Top-Left 3x3):\n{np.round(M_pin[:3,:3], 4)}")
+
+            print("\n-- M COMPARISON METRICS --")
+            print(f"MAX ABS ERROR: {M_err_max:.4e}")
+            print(f"FROBENIUS NORM (Total Diff): {M_err_norm:.4e}")
+
+            print("="*80 + "\n")
 
         except Exception as e:
-            print(f"\n[ERROR] Failed to retrieve dynamics matrices: {e}")
-            print("Ensure the UR RTDE Interfaces are connected and running.")
-
+            print(f"\n[ERROR] Failed to retrieve or compare dynamics matrices: {e}")
+            print("Ensure the UR RTDE Interfaces are connected and Pinocchio is initialized.")
 
 # ===========================
 # MAIN EXECUTION
@@ -193,7 +259,6 @@ class URDynamicsWrapper(URImpedanceController):
 
 if __name__ == "__main__":
     IP = "192.168.1.33" 
-    # Placeholder values needed by URImpedanceController.__init__
     K = np.diag([100.0] * 6)
     robot = None
 
@@ -219,7 +284,14 @@ if __name__ == "__main__":
         # --- STEP 2: Go to Approach Position and Debug ---
         print("\n--- STEP 2: Moving to Approach Position ---")
         # Using go_to_approach() as requested
-        robot.go_to_approach()
+        robot.moveJ([
+            -pi / 1.8,
+            -pi / 1.8,
+            pi / 1.8,
+            -pi / 1.8,
+            -pi / 1.8,
+            pi,
+        ])
         
         # Check and debug while moving (Jdot should be non-zero)
         robot.wait_for_commands() # Wait for non-blocking command to be processed

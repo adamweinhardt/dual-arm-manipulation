@@ -513,6 +513,94 @@ class URForceController(URController):
         self.stop_control()
         super().disconnect
 
+    def save_run_data(self, directory="runs"):
+        """
+        Saves all run parameters and time-series control data for post-processing.
+        The data is saved to a compressed .npz file containing both metadata
+        and arrays derived from self.control_data.
+
+        Data is organized into:
+        - Metadata (scalar parameters and initial state)
+        - Time-series arrays (all keys from self.control_data)
+        """
+        if not self.control_data:
+            print("No control data to save.")
+            return
+
+        # 1. Create directory and filename
+        os.makedirs(directory, exist_ok=True)
+        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        robot_id = getattr(self, "robot_id", "x")
+        filename = os.path.join(
+            directory, f"control_run_{current_datetime}_R{robot_id}.npz"
+        )
+
+        # 2. Extract metadata and run parameters
+        # Safely extract PID gains, accounting for VectorPIDController structure
+        def get_pid_gains(pid_controller):
+            if pid_controller is None:
+                return 0, 0, 0
+            # Ensure 3 elements for vector PID, even if initialized with scalar
+            kp = pid_controller.kp if pid_controller.kp.size == 3 else np.repeat(pid_controller.kp.item(), 3)
+            ki = pid_controller.ki if pid_controller.ki.size == 3 else np.repeat(pid_controller.ki.item(), 3)
+            kd = pid_controller.kd if pid_controller.kd.size == 3 else np.repeat(pid_controller.kd.item(), 3)
+            return kp, ki, kd
+
+        kp_f, ki_f, kd_f = get_pid_gains(self.force_pid)
+        kp_p, ki_p, kd_p = get_pid_gains(self.pose_pid)
+        kp_r, ki_r, kd_r = get_pid_gains(self.rot_pid)
+        Kp_p, Ki_p, Kd_p = get_pid_gains(self.ff_pose_pid)
+        
+        metadata = {
+            "timestamp_start": self.start_time,
+            "control_rate_hz": self.control_rate_hz,
+            "robot_id": robot_id,
+            "reference_force": self.ref_force,
+            "distance_cap": self.distance_cap,
+            "control_timeout": self.control_timeout,
+            "deadzone_threshold": self.deadzone_threshold,
+            
+            # PID gains (Force)
+            "kp_f": kp_f, "ki_f": ki_f, "kd_f": kd_f,
+            # PID gains (Pose)
+            "kp_p": kp_p, "ki_p": ki_p, "kd_p": kd_p,
+            # PID gains (Rotation)
+            "kp_r": kp_r, "ki_r": ki_r, "kd_r": kd_r,
+            # PID gains (Feed-Forward Pose)
+            "Kp_p": Kp_p, "Ki_p": Ki_p, "Kd_p": Kd_p,
+            
+            # Initial state and references
+            "start_position": self.start_position,
+            "start_rotation": self.start_rotation,
+            "grasping_point": self.grasping_point,
+            "control_direction": self.control_direction,
+            "trajectory_available": self.rot_updates is not None,
+        }
+
+        # 3. Structure time-series data
+        data_to_save = {}
+        if self.control_data:
+            data_keys = self.control_data[0].keys()
+            for key in data_keys:
+                try:
+                    # Stack all values for a given key across all time steps
+                    # This works for vectors (3D arrays) and scalars
+                    data_array = np.stack([d[key] for d in self.control_data])
+                    data_to_save[key] = data_array
+                except ValueError:
+                    # If stacking failed (e.g., mixing array sizes or non-stackable types)
+                    # Try converting to a simple flat array
+                    data_to_save[key] = np.array([d[key] for d in self.control_data])
+                except KeyError:
+                    print(f"Key {key} missing in some log entries.")
+
+        # 4. Combine metadata and time-series data for saving
+        save_dict = {**metadata, **data_to_save}
+
+        # 5. Save the data
+        np.savez_compressed(filename, **save_dict)
+        print(f"Control run data saved successfully to: {filename}")
+
     def plot_PID(self):
         """
         Plot Force PID, Pose PID, and Feed-Forward Pose PID (P/I/D) per axis over time,

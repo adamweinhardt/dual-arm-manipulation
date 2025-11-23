@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import zmq
 import pinocchio as pin
-
+from pinocchio import skew
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
@@ -14,6 +14,19 @@ from robot_ipc_control.pose_estimation.transform_utils import (
     rvec_to_rotmat,
     rotmat_to_rvec,
 )
+
+# --- REQUIRED RTDE VARIABLES FOR ADVANCED CONTROL ---
+RTDE_OUTPUT_VARIABLES = [
+    "actual_q",
+    "actual_qd",
+    "actual_TCP_pose",
+    "actual_TCP_speed",
+    "actual_TCP_force",
+    "output_double_register_0",
+    "output_double_register_6",
+    "output_double_register_18",
+    "robot_mode",
+]
 
 
 class URController(threading.Thread):
@@ -42,10 +55,16 @@ class URController(threading.Thread):
             self.port = None
             self.ee2marker_offset = None
 
-        # Robot connections
         self.rtde_control = RTDEControlInterface(self.ip)
         self.rtde_receive = RTDEReceiveInterface(self.ip)
-
+        
+        # 4. NOW, connect the receive interface, expecting the registers to be live
+        # self.rtde_receive = RTDEReceiveInterface(
+        #     self.ip,
+        #     frequency=float(hz),
+        #     variables=RTDE_OUTPUT_VARIABLES 
+        # )
+        
         # Command queue for threading
         self.command_queue = queue.Queue()
         self._stop_event = threading.Event()
@@ -59,7 +78,7 @@ class URController(threading.Thread):
         
         self.T_r2w = self.robot_config #4x4 hom transform
         self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float) #rotation 3x3
-        self.R_r2w = self.R_r2w @ np.array([[-1, 0, 0],
+        self.R_r2w_pin = self.R_r2w @ np.array([[-1, 0, 0],
                                             [ 0,-1, 0],
                                             [ 0, 0, 1]])
 
@@ -295,6 +314,31 @@ class URController(threading.Thread):
         J_world[:3, :] = self.R_r2w @ J[:3, :]
         J_world[3:, :] = self.R_r2w @ J[3:, :]
         return J_world
+    
+    def get_J_world2(self, J):
+        """Transform Jacobian using the full Adjoint operator."""
+        R = self.R_r2w
+        p = self.T_r2w[:3, 3].reshape(-1, 1) # Extract translation vector p_r2w
+
+        # Build the Adjoint (Spatial) Transformation Matrix X_r2w
+        # X = [ R, S(p)*R ]
+        #     [ 0,    R   ]
+        S_p = skew(p.flatten())
+
+        X_r2w = np.zeros((6, 6))
+        X_r2w[:3, :3] = R
+        X_r2w[:3, 3:] = S_p @ R # The cross-product term
+        X_r2w[3:, 3:] = R
+
+        J_world = X_r2w @ J
+        return J_world
+
+    def get_J_world_pin(self, J):
+        """Rotate Jacobian from robot-base to world frame."""
+        J_world = np.zeros_like(J)
+        J_world[:3, :] = self.R_r2w_pin @ J[:3, :]
+        J_world[3:, :] = self.R_r2w_pin @ J[3:, :]
+        return J_world
 
     def speedStop(self):
         command = lambda: self.rtde_control.speedStop()
@@ -375,79 +419,6 @@ class URController(threading.Thread):
             "filtered_force_world": filtered_force_world,
             "gripper_world": gripper_world,
         }
-    
-    def get_state2(self):
-        """Get robot state with correct world-frame pose/velocity (handles flipped URDF and EE offset)."""
-
-        # --- Raw readings from UR RTDE ---
-        pose_robot_base = np.array(self.rtde_receive.getActualTCPPose())
-        force_robot_base = np.array(self.rtde_receive.getActualTCPForce())
-        speed_robot_base = np.array(self.rtde_receive.getActualTCPSpeed())
-        joints = self.rtde_receive.getActualQ()
-
-        # --- Transform to world frame ---
-        R_r2w = self.robot_config[:3, :3]
-        t_r2w = self.robot_config[:3, 3]
-
-        # TCP pose in world
-        p_r_tcp = pose_robot_base[:3]
-        R_r_tcp = rvec_to_rotmat(pose_robot_base[3:])
-        p_w_tcp = R_r2w @ p_r_tcp + t_r2w
-        R_w_tcp = R_r2w @ R_r_tcp
-        pose_world = np.hstack([p_w_tcp, rotmat_to_rvec(R_w_tcp)])
-
-        # TCP twist in world
-        v_r_tcp = speed_robot_base[:3]
-        w_r_tcp = speed_robot_base[3:]
-        v_w_tcp = R_r2w @ v_r_tcp
-        w_w_tcp = R_r2w @ w_r_tcp
-        speed_world = np.hstack([v_w_tcp, w_w_tcp])
-
-        # --- Correct EE marker offset (rotated!) ---
-        # offset in TCP frame
-        if self.ip == "192.168.1.66":   # right
-            r_tcp_to_marker = np.array([0.00,  0.05753, -0.10])
-        else:                           # left
-            r_tcp_to_marker = np.array([0.00, -0.05753, -0.10])
-
-        # marker pose in world
-        p_w_marker = p_w_tcp + R_w_tcp @ r_tcp_to_marker
-        rvec_w_marker = rotmat_to_rvec(R_w_tcp)
-        gripper_world = np.hstack([p_w_marker, rvec_w_marker])
-
-        # marker velocity in world (v_marker = v_tcp + ω × (R * r))
-        v_w_marker = v_w_tcp + np.cross(w_w_tcp, R_w_tcp @ r_tcp_to_marker)
-        speed_world_marker = np.hstack([v_w_marker, w_w_tcp])
-
-        # --- Forces to world ---
-        f_r_tcp = force_robot_base[:3]
-        tau_r_tcp = force_robot_base[3:]
-        f_w_tcp = R_r2w @ f_r_tcp
-        tau_w_tcp = R_r2w @ tau_r_tcp
-        force_world = np.hstack([f_w_tcp, tau_w_tcp])
-
-        # --- Simple low-pass filter ---
-        filtered_force = self.force_low_pass_filter(self.previous_force, force_robot_base, self.alpha)
-        self.previous_force = filtered_force
-
-        filtered_force_world = self.force_low_pass_filter(self.previous_force_world, f_w_tcp, self.alpha)
-        self.previous_force_world = filtered_force_world
-
-        # --- Package everything ---
-        return {
-            "pose": pose_robot_base,                     # TCP in robot base
-            "pose_world": pose_world,                    # TCP in world
-            "gripper_world": gripper_world,              # marker in world
-            "speed": speed_robot_base,                   # TCP twist in robot base
-            "speed_world": speed_world,                  # TCP twist in world
-            "speed_world_marker": speed_world_marker,    # marker twist in world
-            "force": force_robot_base,
-            "force_world": force_world,
-            "filtered_force": filtered_force,
-            "filtered_force_world": filtered_force_world,
-            "joints": joints,
-        }
-
 
     def is_moving(self):
         speeds = self.rtde_receive.getActualTCPSpeed()
