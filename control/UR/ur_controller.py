@@ -57,13 +57,7 @@ class URController(threading.Thread):
 
         self.rtde_control = RTDEControlInterface(self.ip)
         self.rtde_receive = RTDEReceiveInterface(self.ip)
-        
-        # 4. NOW, connect the receive interface, expecting the registers to be live
-        # self.rtde_receive = RTDEReceiveInterface(
-        #     self.ip,
-        #     frequency=float(hz),
-        #     variables=RTDE_OUTPUT_VARIABLES 
-        # )
+        self.rtde_control.zeroFtSensor()
         
         # Command queue for threading
         self.command_queue = queue.Queue()
@@ -78,9 +72,14 @@ class URController(threading.Thread):
         
         self.T_r2w = self.robot_config #4x4 hom transform
         self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float) #rotation 3x3
-        self.R_r2w_pin = self.R_r2w @ np.array([[-1, 0, 0],
-                                            [ 0,-1, 0],
-                                            [ 0, 0, 1]])
+        self.T_w2r = np.linalg.inv(self.T_r2w)
+        # self.R_r2w_pin = self.R_r2w @ np.array([[-1, 0, 0],
+        #                                     [ 0,-1, 0],
+        #                                     [ 0, 0, 1]])
+        
+        self.R_r2w_pin = np.array([[-1, 0, 0],
+                                   [ 0,-1, 0],
+                                   [ 0, 0, 1]])
 
         self.t_r2w = self.T_r2w[:3, 3] # +  np.array([0.00, -0.05753, -0.10]) #offset from tcp to my gripper. 3x1
 
@@ -105,7 +104,7 @@ class URController(threading.Thread):
         # Data recording
         self.previous_force = None
         self.previous_force_world = None
-        self.alpha = 1
+        self.alpha = 0.85
         self.data = []
         self.forces = []
 
@@ -219,7 +218,24 @@ class URController(threading.Thread):
                 robot_rvec[2],
             ]
         )
+    
+    def world_point_2_robot(self, world_point):
+        """
+        Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
+        """
+        # 1. Augment the 3D point to 4D Homogeneous [x, y, z, 1]
+        world_point_4d = np.append(world_point, 1.0)
 
+        # 2. Invert the matrix (Get World -> Robot)
+        robot_to_world = self.T_r2w
+        world_to_robot = np.linalg.inv(robot_to_world)
+
+        # 3. Multiply
+        local_point_4d = world_to_robot @ world_point_4d
+
+        # 4. Return the first 3 elements [x, y, z]
+        return local_point_4d[:3]
+    
     def robot_2_world(self, local_pose, robot_to_world):
         local_pose_6d = np.array(local_pose)
 
@@ -308,32 +324,7 @@ class URController(threading.Thread):
         except Exception as e:
             print(f"ERROR in speedL_world: {e}")
 
-    def get_J_world(self, J):
-        """Rotate Jacobian from robot-base to world frame."""
-        J_world = np.zeros_like(J)
-        J_world[:3, :] = self.R_r2w @ J[:3, :]
-        J_world[3:, :] = self.R_r2w @ J[3:, :]
-        return J_world
-    
-    def get_J_world2(self, J):
-        """Transform Jacobian using the full Adjoint operator."""
-        R = self.R_r2w
-        p = self.T_r2w[:3, 3].reshape(-1, 1) # Extract translation vector p_r2w
-
-        # Build the Adjoint (Spatial) Transformation Matrix X_r2w
-        # X = [ R, S(p)*R ]
-        #     [ 0,    R   ]
-        S_p = skew(p.flatten())
-
-        X_r2w = np.zeros((6, 6))
-        X_r2w[:3, :3] = R
-        X_r2w[:3, 3:] = S_p @ R # The cross-product term
-        X_r2w[3:, 3:] = R
-
-        J_world = X_r2w @ J
-        return J_world
-
-    def get_J_world_pin(self, J):
+    def get_J_pin(self, J):
         """Rotate Jacobian from robot-base to world frame."""
         J_world = np.zeros_like(J)
         J_world[:3, :] = self.R_r2w_pin @ J[:3, :]
