@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+import pinocchio as pin
 
 # -------------------------------------------------
 # Basic SE(3) helpers
@@ -253,3 +254,24 @@ def _as_2d(x, name, shape0=None, shape1=None):
     if shape1 is not None and a.shape[1] != shape1:
         raise ValueError(f"{name} shape[1] {a.shape[1]} != {shape1}")
     return a
+
+def diag6(vals):
+    a = np.asarray(vals, dtype=float).reshape(-1)
+    if a.size == 1:
+        return np.eye(6) * a.item()
+    if a.size == 3:
+        return np.diag([a[0], a[1], a[2], a[0], a[1], a[2]])
+    if a.size == 6:
+        return np.diag(a)
+    raise ValueError("diag6 expects 1, 3, or 6 values")
+
+def is_finite(*arrays):
+    return all(np.all(np.isfinite(np.asarray(x))) for x in arrays)
+
+def short_arc_log(R_ref, R_cur):
+    q_ref = R.from_matrix(R_ref).as_quat()
+    q_cur = R.from_matrix(R_cur).as_quat()
+    if np.dot(q_ref, q_cur) < 0.0:
+        q_ref = -q_ref
+    R_rel = (R.from_quat(q_ref) * R.from_quat(q_cur).inv()).as_matrix()
+    return pin.log3(R_rel)

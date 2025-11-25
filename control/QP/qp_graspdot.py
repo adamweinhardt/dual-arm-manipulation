@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import datetime
 import os
 
-from control.pid_ff_controller import URForceController
+from control.PID.pid_ff_controller import URForceController
 from utils.utils import _freeze_sparsity
 
 
@@ -28,6 +28,8 @@ class DualArmGraspingQPAccel:
         self.robotL = robotL
         self.robotR = robotR
         self.Hz = Hz
+        self.normal_L = self.robotL.get_grasping_data()[2]
+        self.normal_R = self.robotR.get_grasping_data()[2]
 
         # logging
         self.log_every_s = 1.0
@@ -130,9 +132,8 @@ class DualArmGraspingQPAccel:
                 state_L = self.robotL.get_state()
                 q_L     = self.robotL.get_q()
                 qdot_L  = self.robotL.get_qdot()
-                R_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
-                n_L = -R_L[:, 1]  # TCP +Y axis (world-aligned)
-                F_L = np.array(state_L["force_world"][:3])
+                n_L = self.normal_L
+                F_L = np.array(state_L["filtered_force_world"][:3])
                 F_n_L = float(n_L @ F_L)
                 J_L = self.robotL.get_J(q_L)
 
@@ -140,10 +141,8 @@ class DualArmGraspingQPAccel:
                 state_R = self.robotR.get_state()
                 q_R     = self.robotR.get_q()
                 qdot_R  = self.robotR.get_qdot()
-                R_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
-                n_R = -R_R[:, 1]
-                F_R = np.array(state_R["force_world"][:3])
-                # keep same sign convention as your previous code
+                n_R = -self.normal_R
+                F_R = np.array(state_R["filtered_force_world"][:3])
                 F_n_R = -float(n_R @ F_R)
                 J_R = self.robotR.get_J(q_R)
 
@@ -346,7 +345,7 @@ if __name__ == "__main__":
         robotL.wait_until_done(); robotR.wait_until_done()
 
         # run with acceleration-optimized controller
-        ctrl.run(F_n_star=25.0, k_f=3e-4, v_max=0.1)
+        ctrl.run(F_n_star=25.0, k_f=6e-4, v_max=0.5)
         ctrl.plot_force_profile()
 
     except KeyboardInterrupt:

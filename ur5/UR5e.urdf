@@ -295,7 +295,6 @@
     <child link="tool0"/>
   </joint>
   <link name="tcp"/>
-  <!-- Default here shows RIGHT arm (+Y). For LEFT arm, change Y to -0.05753 -->
   <joint name="tool0-tcp" type="fixed">
     <parent link="tool0"/>
     <child  link="tcp"/>
