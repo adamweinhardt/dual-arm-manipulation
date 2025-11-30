@@ -198,10 +198,10 @@ class DualArmImpedanceAdmittanceQP:
             self.R_ref_L[t] = (R_box[t] @ R_box0.T) @ R0_L
             self.w_ref_L[t] = w_box[t]
             # Right
-            self.p_ref_R[t] = p0_R + p_box[t]
-            self.v_ref_R[t] = v_box[t]
+            self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
+            self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
             self.R_ref_R[t] = (R_box[t] @ R_box0.T) @ R0_R
-            self.w_ref_R[t] = w_box[t]
+            self.w_ref_R[t] = w_box[t] 
 
             # self.p_ref_L[t] += R_box[t] @ (self.normal_L_base * (self.box_dimensions / 2.0))
             # self.p_ref_R[t] += R_box[t] @ (self.normal_R_base * (self.box_dimensions / 2.0))
@@ -277,7 +277,7 @@ class DualArmImpedanceAdmittanceQP:
         ]
         
         self.qp = cp.Problem(cp.Minimize(obj), cons)
-        self.qp_kwargs = dict(eps_abs=3e-6, eps_rel=3e-6, alpha=1.6, max_iter=10000,
+        self.qp_kwargs = dict(eps_abs=1e-6, eps_rel=1e-6, alpha=1.6, max_iter=10000,
                               adaptive_rho=True, adaptive_rho_interval=20, polish=True,
                               check_termination=10, warm_start=True)
         
@@ -387,6 +387,8 @@ class DualArmImpedanceAdmittanceQP:
                 # Reference vector
                 F_L_ref = self.ref_force * n_L
                 F_R_ref = self.ref_force * n_R
+                F_n_L = float(F_L @ n_L) #plots
+                F_n_R = float(F_R @ n_R)
 
                 # Vector errors
                 e_P_L = F_L_ref - F_L
@@ -497,7 +499,8 @@ class DualArmImpedanceAdmittanceQP:
                         "F_L_vec": F_L,      "F_R_vec": F_R,
                         "F_L_ref": F_L_ref,  "F_R_ref": F_R_ref,
                         "F_n_star": self.ref_force,
-                        "v_star_L": v_star_L, "v_star_R": v_star_R
+                        "v_star_L": v_star_L, "v_star_R": v_star_R, 
+                        "F_n_L": F_n_L,      "F_n_R": F_n_R,
                     },
                     "tcp_L": tcp_L,
                     "tcp_R": tcp_R,
@@ -843,6 +846,64 @@ class DualArmImpedanceAdmittanceQP:
         plt.savefig(f"plots/{title_prefix}_{timestamp}.png")
         plt.close()
 
+    def plot_force_profile(self, title_prefix="DualGraspAccel_Forces"):
+        if not self.control_data:
+            print("No control_data to plot.")
+            return
+
+        os.makedirs("plots", exist_ok=True)
+
+        ts = np.array([d["t"] for d in self.control_data])
+        t = ts - ts[0]
+
+        # Scalars stored inside force_data
+        F_n_L = np.array([d["force_data"]["F_n_L"] for d in self.control_data])
+        F_n_R = np.array([d["force_data"]["F_n_R"] for d in self.control_data])
+        ref_force = np.array([d["force_data"]["F_n_star"] for d in self.control_data])
+
+        # Here I'm assuming you want the *Y* component of v_star_* (since your ylabel says TCP Y vel)
+        # If your normal is some other axis, change [1] to the correct index or project onto the normal.
+        v_n_L = np.array([d["force_data"]["v_star_L"][1] for d in self.control_data])
+        v_n_R = np.array([d["force_data"]["v_star_R"][1] for d in self.control_data])
+
+        # QP objective total from obj_break
+        obj = np.array([d["obj_break"]["total"] for d in self.control_data])
+
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+        fig.suptitle(f"{title_prefix} – {datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+
+        # --- normal forces ---
+        ax = axes[0]
+        ax.plot(t, F_n_L, label="F_n_L meas")
+        ax.plot(t, F_n_R, label="F_n_R meas")
+        ax.plot(t, ref_force, "--", color="black", label="F*_n ref")
+        ax.set_ylabel("Force [N]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title("Normal Force vs Ref")
+
+        # --- admittance commanded velocity (Y component here) ---
+        ax = axes[1]
+        ax.plot(t, v_n_L, label="v*_n L (Y)")
+        ax.plot(t, v_n_R, label="v*_n R (Y)")
+        ax.set_ylabel("TCP Y vel [m/s]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title("Admittance Command Velocity")
+
+        # --- QP objective ---
+        ax = axes[2]
+        ax.plot(t, obj, label="QP objective")
+        ax.set_ylabel("Objective")
+        ax.set_xlabel("Time [s]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        plt.tight_layout(rect=[0, 0.02, 1, 0.97])
+        fname = f"plots/{title_prefix.lower()}_{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}.png"
+        plt.savefig(fname, dpi=150)
+        plt.close()
+
 
 if __name__ == "__main__":
     # Stiffness
@@ -851,15 +912,16 @@ if __name__ == "__main__":
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
 
-    W_imp = diag6([1.0, 1.0, 1.0, 1e3, 1e3, 1e3])
+    W_imp = diag6([1.0, 1.0, 1.0, 1e5, 1e5, 1e5])
     #W_imp = diag6([0, 0, 0, 0, 0, 0])
-    W_grasp = diag6([7e1, 7e1, 7e1, 1e3, 1e3, 1e3])
+    W_grasp = diag6([5e1, 5e1, 5e1, 1e7, 1e7, 1e7])
+    #W_grasp = diag6([0, 0, 0, 0, 0, 0])
     lambda_reg = 1e-6
     # Admittance Params (PD)
-    k_p = 5e-4
-    k_d = 1e-4
+    k_p = 6e-4
+    k_d = 2e-4
     v_max = 0.5
-    F = 25
+    F = 20
 
 
     traj_path = "motion_planner/trajectories_old/lift_100.npz"
@@ -901,6 +963,7 @@ if __name__ == "__main__":
         ctrl.plot_jointspace("R")
         ctrl.plot_qp_objective()
         ctrl.plot_qp_performance()
+        ctrl.plot_force_profile()
         ctrl.plot_force_tracking()
 
     except KeyboardInterrupt:
