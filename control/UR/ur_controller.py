@@ -93,7 +93,7 @@ class URController(threading.Thread):
         # Data recording
         self.previous_force = None
         self.previous_force_world = None
-        self.alpha = 0.75
+        self.alpha = 0.7
         self.data = []
         self.forces = []
 
