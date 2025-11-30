@@ -15,20 +15,6 @@ from robot_ipc_control.pose_estimation.transform_utils import (
     rotmat_to_rvec,
 )
 
-# --- REQUIRED RTDE VARIABLES FOR ADVANCED CONTROL ---
-RTDE_OUTPUT_VARIABLES = [
-    "actual_q",
-    "actual_qd",
-    "actual_TCP_pose",
-    "actual_TCP_speed",
-    "actual_TCP_force",
-    "output_double_register_0",
-    "output_double_register_6",
-    "output_double_register_18",
-    "robot_mode",
-]
-
-
 class URController(threading.Thread):
     def __init__(self, ip, hz=50):
         super().__init__(daemon=True)
@@ -41,6 +27,8 @@ class URController(threading.Thread):
             )
             self.port = 5559
             self.ee2marker_offset = np.array([0.00, 0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset_base = np.array([0.00, -0.05753, -0.10, 0, 0, 0])
+
 
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
@@ -49,6 +37,7 @@ class URController(threading.Thread):
             )
             self.port = 5556
             self.ee2marker_offset = np.array([0.00, -0.05753, -0.10, 0, 0, 0])
+            self.ee2marker_offset_base = np.array([0.00, -0.05753, -0.10, 0, 0, 0])
         else:
             self.robot_id = None
             self.robot_config = None
@@ -104,7 +93,7 @@ class URController(threading.Thread):
         # Data recording
         self.previous_force = None
         self.previous_force_world = None
-        self.alpha = 0.85
+        self.alpha = 0.75
         self.data = []
         self.forces = []
 
@@ -223,18 +212,24 @@ class URController(threading.Thread):
         """
         Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
         """
-        # 1. Augment the 3D point to 4D Homogeneous [x, y, z, 1]
         world_point_4d = np.append(world_point, 1.0)
+        print(world_point)
 
-        # 2. Invert the matrix (Get World -> Robot)
         robot_to_world = self.T_r2w
         world_to_robot = np.linalg.inv(robot_to_world)
 
-        # 3. Multiply
         local_point_4d = world_to_robot @ world_point_4d
 
-        # 4. Return the first 3 elements [x, y, z]
         return local_point_4d[:3]
+    
+    def world_vector_2_robot(self, normal_world):
+        """
+        Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
+        """
+        R_r2w = self.robot_config[:3, :3]   # rotation robot → world
+        R_w2r = R_r2w.T                     # inverse rotation
+        
+        return R_w2r @ normal_world
     
     def robot_2_world(self, local_pose, robot_to_world):
         local_pose_6d = np.array(local_pose)
@@ -392,7 +387,7 @@ class URController(threading.Thread):
         )
         self.previous_force_world = filtered_force_world
 
-        # === FINAL CALCULATIONS ===
+        gripper_base = pose_robot_base - self.ee2marker_offset_base
         gripper_world = pose_world - self.ee2marker_offset
 
         self.forces.append([force_vector_world, filtered_force_world])
@@ -409,6 +404,7 @@ class URController(threading.Thread):
             "filtered_force": filtered_force,
             "filtered_force_world": filtered_force_world,
             "gripper_world": gripper_world,
+            "gripper_base": gripper_base,
         }
 
     def is_moving(self):
