@@ -1333,25 +1333,111 @@ if __name__ == "__main__":
     )
 
     # Concatenate everything into one stress-test trajectory
-    full_trajectory = planner.concatenate_trajectories(
-        [
-            seg_lift,
-            hold_up,
-            seg_1,
-            circle_xy,
-            seg_2,
-            seg_3,
-            circle_xz,
-            seg_4,
-            seg_5,
-            seg_down,
-        ]
+    # full_trajectory = planner.concatenate_trajectories(
+    #     [
+    #         seg_lift,
+    #         hold_up,
+    #         seg_1,
+    #         circle_xy,
+    #         seg_2,
+    #         seg_3,
+    #         circle_xz,
+    #         seg_4,
+    #         seg_5,
+    #         seg_down,
+    #     ]
+    # )
+    theta = np.deg2rad(30.0)
+    R_y = np.array([
+        [ np.cos(theta),  0.0, np.sin(theta)],
+        [ 0.0,            1.0, 0.0          ],
+        [-np.sin(theta),  0.0, np.cos(theta)],
+    ])
+
+    pose_twist_y = pose2.copy()
+    # rotate relative to pose2's current orientation (in case pose2 ever changes)
+    pose_twist_y[:3, :3] = pose2[:3, :3] @ R_y
+    twist_y = planner.linear(
+        pose2,
+        pose_twist_y,
+        dt,
+        max_velocity=0.25,
+        max_acceleration=0.1,
     )
+
+    theta = np.deg2rad(45.0)
+    R_x = np.array([
+        [1.0,           0.0,            0.0],
+        [0.0,  np.cos(theta), -np.sin(theta)],
+        [0.0,  np.sin(theta),  np.cos(theta)],
+    ])
+
+    pose_twist_x = pose2.copy()
+    pose_twist_x[:3, :3] = pose2[:3, :3] @ R_x 
+
+    twist_x = planner.linear(
+        pose2,
+        pose_twist_x,
+        dt,
+        max_velocity=0.25,
+        max_acceleration=0.1,
+    )
+
+    def mirror_reference_rotations_y(in_npz: str,
+                                 out_npz: str = "motion_planner/trajectories_old/twist_y_mirrored.npz") -> None:
+        """
+        Load a reference trajectory NPZ (box/world reference),
+        mirror **all rotations** by 180° about the LOCAL Y axis at every waypoint,
+        and save a new NPZ with identical positions/velocities/accelerations.
+
+        R'(k) = R(k) @ R_y(pi),  where R_y(pi) = diag([-1, 1, -1])
+        """
+        if not in_npz.endswith(".npz"):
+            in_npz += ".npz"
+        os.makedirs(os.path.dirname(out_npz), exist_ok=True)
+
+        data = np.load(in_npz, allow_pickle=True)
+
+        # Pull as-is (positions and all kinematics preserved)
+        trajectory_type   = str(data["trajectory_type"])
+        parameters        = data["parameters"].item() if "parameters" in data else {}
+        time              = data["time"]
+        position          = data["position"]
+        Rmats             = data["rotation_matrices"]            # shape [N, 3, 3]
+        lin_vel           = data["linear_velocity"]
+        ang_vel           = data["angular_velocity"]
+        lin_acc           = data["linear_acceleration"]
+        ang_acc           = data["angular_acceleration"]
+
+        # Mirror rotations about LOCAL Y: post-multiply by R_y(pi)
+        Ry_pi = np.diag([-1.0, 1.0, -1.0])
+        Rmats_mirrored = Rmats @ Ry_pi
+
+        # Optional: regenerate Euler (xyz) for convenience
+        euler_mirrored = Rotation.from_matrix(Rmats_mirrored).as_euler("xyz")
+
+        # Save mirrored copy
+        if not out_npz.endswith(".npz"):
+            out_npz += ".npz"
+        np.savez_compressed(
+            out_npz,
+            trajectory_type=trajectory_type,
+            parameters=parameters,
+            time=time,
+            position=position,
+            rotation_matrices=Rmats_mirrored,
+            euler_angles=euler_mirrored,
+            linear_velocity=lin_vel,
+            angular_velocity=ang_vel,
+            linear_acceleration=lin_acc,
+            angular_acceleration=ang_acc,
+        )
+        print(f"Saved mirrored trajectory: {out_npz}  | waypoints: {len(time)}")
 
     #full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
     # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
     # full_trajectory = planner.concatenate_trajectories([up, circle, down]) #circle
-    #full_trajectory = planner.concatenate_trajectories([up, twist]) #twist
+    full_trajectory = planner.concatenate_trajectories([up, twist_x]) #twist
     #full_trajectory = planner.concatenate_trajectories([UP, hold_9])
     fig3d, _ = full_trajectory.plot_3d()
     fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
@@ -1363,4 +1449,7 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    full_trajectory.save_trajectory("motion_planner/trajectories/trajectory_3d_stress_test.npz")
+    #full_trajectory.save_trajectory("motion_planner/trajectories_old/twist_x.npz")
+
+    mirror_reference_rotations_y("motion_planner/trajectories_old/twist.npz",
+                                "motion_planner/trajectories_old/twist_mirrored.npz")

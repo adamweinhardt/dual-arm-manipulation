@@ -275,65 +275,12 @@ class DualArmImpedanceAdmittanceQP:
             -self.joint_accel_limit <= self.qddot_L, self.qddot_L <= self.joint_accel_limit,
             -self.joint_accel_limit <= self.qddot_R, self.qddot_R <= self.joint_accel_limit,
         ]
-
-
-        self.S_n_p = cp.Parameter((1,3), name="S_n")   # normal projector
-        self.S_t_p = cp.Parameter((2,3), name="S_t")   # tangential projector
-        self.S_w_p = cp.Parameter((3,3), name="S_w")
-
-        vL = x_dot_next_L[:3]
-        wL = x_dot_next_L[3:]
-        vR = x_dot_next_R[:3]
-        wR = x_dot_next_R[3:]
-
-        Wc = 1e6  # start modest; raise if it behaves well
-        e_couple = cp.hstack([
-            self.S_t_p @ (vL - vR),
-            self.S_n_p @ (vL + vR),
-            self.S_w_p @ (wL - wR)
-        ])
-        obj += Wc * cp.sum_squares(e_couple)
-
-
+        
         self.qp = cp.Problem(cp.Minimize(obj), cons)
         self.qp_kwargs = dict(eps_abs=3e-6, eps_rel=3e-6, alpha=1.6, max_iter=10000,
                               adaptive_rho=True, adaptive_rho_interval=20, polish=True,
                               check_termination=10, warm_start=True)
         
-    def _update_selection_mats(self):
-        # Use BASE-FRAME normals because J is in base frame
-        nL = np.asarray(self.normal_L_base, dtype=float)
-        nR = np.asarray(self.normal_R_base, dtype=float)
-
-        # Make sure normals are valid
-        if np.linalg.norm(nL) < 1e-8 or np.linalg.norm(nR) < 1e-8:
-            raise ValueError("Base-frame normals are zero; check _init_grasping_data().")
-
-        # Normalize and ensure opposition
-        nL /= np.linalg.norm(nL)
-        nR /= np.linalg.norm(nR)
-        if np.dot(nL, nR) > 0:
-            nR = -nR   # enforce nR ≈ -nL
-
-        n = nL  # reference normal
-
-        # --- Build tangential basis orthogonal to n ---
-        tmp = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        t1 = tmp - n * np.dot(tmp, n)  # remove component along n
-        norm_t1 = np.linalg.norm(t1)
-        if norm_t1 < 1e-8:
-            tmp = np.array([0.0, 0.0, 1.0])
-            t1 = tmp - n * np.dot(tmp, n)
-            norm_t1 = np.linalg.norm(t1)
-            if norm_t1 < 1e-8:
-                raise ValueError("Failed to build tangential basis.")
-        t1 /= norm_t1
-        t2 = np.cross(n, t1)
-
-        # --- Fill Parameters for CVXPY ---
-        self.S_n_p.value = n.reshape(1,3)          # normal selector
-        self.S_t_p.value = np.vstack([t1, t2])     # tangential plane selector
-        self.S_w_p.value = np.eye(3) 
 
     def run(self):
         time.sleep(0.1)
@@ -348,7 +295,6 @@ class DualArmImpedanceAdmittanceQP:
         self.e_P_R_prev = np.zeros(3)
 
         self._init_grasping_data()
-        self._update_selection_mats()
 
         # Init start positions for traj interp
         start_p_L = self.robotL.get_state()["gripper_base"][:3]
@@ -524,17 +470,6 @@ class DualArmImpedanceAdmittanceQP:
                 
                 reg_term = float(self.lambda_reg) * (float(qddot_L_cmd @ qddot_L_cmd) + float(qddot_R_cmd @ qddot_R_cmd))
                 obj_total = imp_L_term + imp_R_term + grasp_L_term + grasp_R_term + reg_term
-
-                if i % 100 == 0:
-                    print("n:", self.S_n_p.value)
-                    print("S_t:\n", self.S_t_p.value)
-                    print("S_w:\n", self.S_w_p.value)
-                    print("n·t1:", np.dot(self.S_n_p.value, self.S_t_p.value[0]))
-                    print("n·t2:", np.dot(self.S_n_p.value, self.S_t_p.value[1]))
-                    print("||e_imp_L||", np.linalg.norm(self.J_L_p.value @ self.qddot_L.value if self.qddot_L.value is not None else 0))
-                    vL_lin = (self.J_L_p.value @ self.qdot_L_p.value)[:3]  # take only linear part
-                    print("||e_couple||", np.linalg.norm(self.S_t_p.value @ vL_lin))
-
 
                 tcp_L = {
                     "p": p_L, "v": v_L, "w": w_L, "rvec": RR.from_matrix(R_L).as_rotvec(),

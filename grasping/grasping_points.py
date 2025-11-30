@@ -413,6 +413,9 @@ class GraspingPointsPublisher:
                                 "total_distance": grasping_pair.total_distance,
                                 "robot_assignment": grasping_pair.robot_assignment,
                                 "timestamp": float(time.time()),
+                                "box_x_dim": box.x_dim,
+                                "box_y_dim": box.y_dim,
+                                "box_z_dim": box.z_dim,
                             }
                         print("-----")
                         print(box.x_dim)

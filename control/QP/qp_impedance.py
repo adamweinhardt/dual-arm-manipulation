@@ -24,6 +24,8 @@ class URImpedanceController(URForceController):
         self.pin_model = pin.buildModelFromUrdf("ur5/UR5e.urdf")
         self.pin_data = self.pin_model.createData()
         self.pin_frame_id = self.pin_model.getFrameId("tool0")
+        grasping_point, _, self.normal = self.get_grasping_data()
+        self.grasping_point = self.world_point_2_robot(grasping_point)
 
     # state
     def get_q(self):
@@ -172,6 +174,8 @@ class DualArmImpedanceQP:
         self.dt = 1.0 / float(self.Hz)
 
         self._npz_path = trajectory_npz_path
+        data = np.load(self._npz_path)
+        self.traj_len = int(data["position"].shape[0])
 
         self.joint_pose_limit  = np.deg2rad(360.0)
         self.joint_speed_limit = np.deg2rad(180.0)
@@ -184,37 +188,43 @@ class DualArmImpedanceQP:
         self.control_data = []
         self._should_stop = threading.Event()
 
+        self.box_dimensions = np.linalg.norm(self.robot_L.get_grasping_data()[0] - self.robot_R.get_grasping_data()[0])
+        self.normal_L = self.robot_L.get_grasping_data()[2]
+        self.normal_R = self.robot_R.get_grasping_data()[2]
+
         self._build_qp(self.dt)
 
-    def _load_refs(self):
-        data = np.load(self._npz_path)
-        p_box = data["position"]
-        v_box = data["linear_velocity"]
-        R_box = data["rotation_matrices"]
-        w_box = data["angular_velocity"]
+
+    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
+        data  = np.load(self._npz_path)
+        p_box = data["position"]            # (T,3) displacement of box center from t=0
+        v_box = data["linear_velocity"]     # (T,3)
+        R_box = data["rotation_matrices"]   # (T,3,3) absolute; R_box[0] is initial
+        w_box = data["angular_velocity"]    # (T,3)
         self.traj_len = int(p_box.shape[0])
 
-        # --- LEFT ARM Init ---
-        state_L = self.robot_L.get_state()
-        p0_L = np.array(state_L["pose"][:3])
-        R0_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
+        # LEFT init
+        p0_L, R0_L = grasping_point_L, grasping_R_L
+        self.p_ref_L, self.v_ref_L = np.zeros_like(p_box), np.zeros_like(v_box)
+        self.R_ref_L, self.w_ref_L = np.zeros_like(R_box), np.zeros_like(w_box)
 
-        self.p_ref_L = np.zeros_like(p_box)
-        self.v_ref_L = np.zeros_like(v_box)
-        self.R_ref_L = np.zeros_like(R_box)
-        self.w_ref_L = np.zeros_like(w_box)
+        # Right
+        p0_R, R0_R = grasping_point_R, grasping_R_R
+        self.p_ref_R, self.v_ref_R = np.zeros_like(p_box), np.zeros_like(v_box)
+        self.R_ref_R, self.w_ref_R = np.zeros_like(R_box), np.zeros_like(w_box)
 
-        # --- RIGHT ARM Init ---
-        state_R = self.robot_R.get_state()
-        p0_R = np.array(state_R["pose"][:3])
-        R0_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
+        # Geometry: single side length (distance between the two faces being grasped)
+        L = float(self.box_dimensions)
+        R_box0 = R_box[0]  # world <- B0
 
-        self.p_ref_R = np.zeros_like(p_box)
-        self.v_ref_R = np.zeros_like(v_box)
-        self.R_ref_R = np.zeros_like(R_box)
-        self.w_ref_R = np.zeros_like(w_box)
+        nL_W = np.array(self.normal_L, dtype=float)
+        nR_W = np.array(self.normal_R, dtype=float)
 
-        R_box0 = R_box[0]
+        # Lever arms in the initial box frame (fixed in B0)
+        rL_B0 =  L * (R_box0.T @ nL_W)
+        rR_B0 = - L * (R_box0.T @ nR_W)
+
+        # ---------- keep your loop shape ----------
         for t in range(self.traj_len):
             # Left
             self.p_ref_L[t] = p0_L + p_box[t]
@@ -227,6 +237,11 @@ class DualArmImpedanceQP:
             self.v_ref_R[t] = v_box[t]
             self.R_ref_R[t] = R_rel @ R0_R
             self.w_ref_R[t] = w_box[t]
+
+            # Universal 3D rotational offsets in world:
+            # Δp_a^W(t) = (R_box[t] - R_box0) @ r_a^B0
+            self.p_ref_L[t] += (R_box[t] - R_box0) @ rL_B0
+            self.p_ref_R[t] += (R_box[t] - R_box0) @ rR_B0
 
     def _build_qp(self, dt):
         n = 6
@@ -283,33 +298,36 @@ class DualArmImpedanceQP:
                                 check_termination=10, warm_start=True)
 
     def run(self):
-        self._load_refs()
         time.sleep(0.1)
         
         dt = self.dt
         t_idx = 0
         self._should_stop.clear()
+        traj_initialized = False
         
         print("[DualArmQP] Starting Joint Impedance QP control loop")
         i = 0
 
+        start_p_L = self.robot_L.get_state()["gripper_base"][:3]
+        start_p_R = self.robot_R.get_state()["gripper_base"][:3]
+        grasping_point_L = self.robot_L.grasping_point
+        grasping_point_R = self.robot_R.grasping_point
+        grasping_R_L = RR.from_rotvec(self.robot_L.get_state()["pose"][3:6]).as_matrix()
+        grasping_R_R = RR.from_rotvec(self.robot_R.get_state()["pose"][3:6]).as_matrix()
+        self._ctrl_start_wall = time.perf_counter()
+
+
         while not self._should_stop.is_set():
             loop_t0 = time.perf_counter()
+            elapsed = loop_t0 - self._ctrl_start_wall
             try:
                 if t_idx >= self.traj_len:
                     print("Trajectory completed.")
                     break
 
-                # --- References ---
-                p_ref_L, v_ref_L = self.p_ref_L[t_idx], self.v_ref_L[t_idx]
-                R_ref_L, w_ref_L = self.R_ref_L[t_idx], self.w_ref_L[t_idx]
-                
-                p_ref_R, v_ref_R = self.p_ref_R[t_idx], self.v_ref_R[t_idx]
-                R_ref_R, w_ref_R = self.R_ref_R[t_idx], self.w_ref_R[t_idx]
-
                 # --- State LEFT ---
                 state_L = self.robot_L.get_state()
-                p_L = np.array(state_L["pose"][:3])
+                p_L = np.array(state_L["gripper_base"][:3])
                 v_L = np.array(state_L["speed"][:3])
                 R_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
                 w_L = np.array(state_L["speed"][3:6])
@@ -321,6 +339,29 @@ class DualArmImpedanceQP:
                 Lam_L, Lam_inv_L = self.robot_L.get_Lambda_and_inv(J_L, M_L)
                 D_L     = self.robot_L.get_D(self.robot_L.K, Lam_L)
 
+                if elapsed < 4.0:
+                    alpha = elapsed / 4.0
+                    p_ref_L = start_p_L + alpha * (grasping_point_L - start_p_L)
+                    R_ref_L = grasping_R_L
+                    v_ref_L, w_ref_L = np.zeros(3), np.zeros(3)
+                    
+                    p_ref_R = start_p_R + alpha * (grasping_point_R - start_p_R)
+                    R_ref_R = grasping_R_R
+                    v_ref_R, w_ref_R = np.zeros(3), np.zeros(3)
+                else:
+                    if not traj_initialized:
+                        print("Loading trajectory references...")
+                        self._load_refs(grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R)
+                        traj_initialized = True
+                        t_idx = 0
+                    
+                    if t_idx < self.traj_len:
+                        p_ref_L, v_ref_L = self.p_ref_L[t_idx], self.v_ref_L[t_idx]
+                        R_ref_L, w_ref_L = self.R_ref_L[t_idx], self.w_ref_L[t_idx]
+                        p_ref_R, v_ref_R = self.p_ref_R[t_idx], self.v_ref_R[t_idx]
+                        R_ref_R, w_ref_R = self.R_ref_R[t_idx], self.w_ref_R[t_idx]
+                        t_idx += 1
+
                 e_p_L = p_ref_L - p_L
                 e_v_L = v_ref_L - v_L
                 e_r_L = short_arc_log(R_ref_L, R_L)
@@ -330,7 +371,7 @@ class DualArmImpedanceQP:
 
                 # --- State RIGHT ---
                 state_R = self.robot_R.get_state()
-                p_R = np.array(state_R["pose"][:3])
+                p_R = np.array(state_R["gripper_base"][:3])
                 v_R = np.array(state_R["speed"][:3])
                 R_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
                 w_R = np.array(state_R["speed"][3:6])
@@ -672,7 +713,7 @@ if __name__ == "__main__":
     W_imp = diag6([1.0, 1.0, 1.0, 0.6, 0.6, 0.6])
     lambda_reg = 1e-6
 
-    traj_path = "motion_planner/trajectories_old/lift_100.npz"
+    traj_path = "motion_planner/trajectories_old/twist.npz"
     Hz = 50
 
     ctrl = DualArmImpedanceQP(

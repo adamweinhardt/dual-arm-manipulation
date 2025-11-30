@@ -16,6 +16,21 @@ from utils.utils import (
     _assert_rotmat,
 )
 
+def flip_y_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
+    rot_matrices = np.asarray(rot_matrices)
+    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), \
+        "Expected rot_matrices with shape (N, 3, 3)"
+
+    # Convert to rotation vectors
+    r = R.from_matrix(rot_matrices)
+    rotvecs = r.as_rotvec()        # shape (N, 3)
+
+    # Flip only the Y component
+    rotvecs[:, 1] *= -1.0
+
+    # Back to matrices
+    r_fixed = R.from_rotvec(rotvecs)
+    return r_fixed.as_matrix()
 
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
@@ -108,6 +123,7 @@ class URForceController(URController):
         self.grasping_socket.connect(f"tcp://127.0.0.1:{grasping_port}")
 
         self.current_grasping_data = {}
+        self.box_dimension = None
 
     def _update_grasping_data(self):
         """Update grasping data from ZMQ (non-blocking)"""
@@ -270,6 +286,15 @@ class URForceController(URController):
     def _compute_reference_rotation(self, R_B0B):
         R_WB = self._R_WB0 @ R_B0B
         return R_WB @ self._R_BG
+    
+    def get_box_dimension(self):
+        while not self._update_grasping_data():
+            time.sleep(0.01)
+
+        box_id = list(self.current_grasping_data.keys())[0]
+        g = self.current_grasping_data[box_id]
+
+        return np.linalg.norm(np.array(g.get("grasping_point0")) - np.array(g.get("grasping_point1")))
 
     def control_to_target(
         self,
@@ -309,6 +334,10 @@ class URForceController(URController):
         if trajectory:
             traj_npz = np.load(trajectory)
             self.rot_updates = traj_npz["rotation_matrices"]
+            if self.robot_id == 0:
+                print("Flipped for robot 0")
+                self.rot_updates = flip_y_component_in_rotations(self.rot_updates)
+                
             self.pose_updates_stream = traj_npz.get("position", None)
             self._traj_len = len(self.rot_updates)
 
@@ -346,6 +375,7 @@ class URForceController(URController):
 
         trajectory_started = False
         trajectory_index = 0
+        self.box_dimension = self.get_box_dimension()
 
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
@@ -388,6 +418,7 @@ class URForceController(URController):
                     R_B0B = _assert_rotmat(
                         "R_B0B(my traj)", self.rot_updates[trajectory_index]
                     )
+
                     if self.robot_id == 0:
                         offset = [-0.055, 0, 0]
                     else:

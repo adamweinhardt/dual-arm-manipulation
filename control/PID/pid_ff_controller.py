@@ -17,6 +17,7 @@ from utils.utils import (
 )
 
 
+
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
 
@@ -116,6 +117,7 @@ class URForceController(URController):
         self.grasping_socket.connect(f"tcp://127.0.0.1:{grasping_port}")
 
         self.current_grasping_data = {}
+        self.box_dimension = None
 
     def _update_grasping_data(self):
         """Update grasping data from ZMQ (non-blocking)"""
@@ -158,6 +160,26 @@ class URForceController(URController):
             np.array(approach_point),
             np.array(normal_vector),
         )
+    
+    def get_box_dimension(self):
+        while not self._update_grasping_data():
+            time.sleep(0.01)
+
+        box_id = list(self.current_grasping_data.keys())[0]
+        g = self.current_grasping_data[box_id]
+
+        return np.linalg.norm(g.get("grasping_point0") - g.get("grasping_point1"))
+
+    
+    def box_dimensions(self):
+        """Get approach point for this robot from latest grasping data"""
+        while not self._update_grasping_data():
+            time.sleep(0.01)
+
+        box_id = list(self.current_grasping_data.keys())[0]
+        g = self.current_grasping_data[box_id]
+
+        return g.get("box_x_dim"), g.get("box_y_dim"), g.get("box_z_dim")
 
     def go_to_approach(self):
         """Go to approach point for grasping - simplified using moveL_world"""
@@ -217,6 +239,7 @@ class URForceController(URController):
     def _compute_reference_rotation(self, R_B0B):
         R_WB = self._R_WB0 @ R_B0B
         return R_WB @ self._R_BG
+    
 
     def control_to_target(
         self,
@@ -293,6 +316,7 @@ class URForceController(URController):
 
         trajectory_started = False
         trajectory_index = 0
+        self.box_dimension = self.get_box_dimension()
 
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
@@ -346,11 +370,18 @@ class URForceController(URController):
                     R_B0B = _assert_rotmat(
                         "R_B0B(my traj)", self.rot_updates[trajectory_index]
                     )
+                    # half_dim = self.box_dimension / 2.0
+                    # if self.robot_id == 0:
+                    #     offset = [-half_dim, 0, 0]
+                    # else:
+                    #     offset = [half_dim, 0, 0]
+
                     if self.robot_id == 0:
                         offset = [-0.055, 0, 0]
                     else:
                         offset = [0.055, 0, 0]
 
+                    # offset = [0,0,0]
                     delta_p_rot_B = (R_B0B - np.eye(3)) @ (self._r_B + offset)
                     delta_p_rot_W = self._R_WB0 @ delta_p_rot_B
                     self.reference_position = (
@@ -358,6 +389,7 @@ class URForceController(URController):
                     )
                     # Rotation
                     R_WG_ref = self._compute_reference_rotation(R_B0B)
+
                     self.reference_rotation_matrix = _assert_rotmat(
                         "my ref_R (traj)", R_WG_ref
                     )
