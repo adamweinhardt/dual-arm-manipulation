@@ -17,28 +17,6 @@ from utils.utils import _freeze_sparsity  # adjust import if needed
 
 
 class DualArmAdmittanceAccelQP:
-    """
-    Dual-arm admittance with a QP that OPTIMIZES OVER q_ddot BUT TRACKS TCP VELOCITY.
-
-    - Outer loop (each arm):
-        M * a_n + D * v_n + K * x_n = e_n,  e_n = (F_ref - F_meas)·n
-        Discretize to update v_n, x_n. Desired TCP velocity along -n:
-            v_des = [-v_n * n, 0_3]
-
-    - Inner loop QP decision variable: q_ddot
-        q_dot_next = q_dot + q_ddot * dt
-        q_next     = q + q_dot * dt + 0.5 * q_ddot * dt^2
-
-        minimize  || W * ( J * q_dot_next - v_des ) ||^2  +  lambda * ||q_ddot||^2
-        subject to:
-            q_next within position limits
-            q_dot_next within velocity limits
-            q_ddot within acceleration limits
-
-    - Command:
-        speedJ(q_dot_next, dt)
-    """
-
     def __init__(
         self,
         robotL,
@@ -47,6 +25,7 @@ class DualArmAdmittanceAccelQP:
         M_a=3.0,
         D_a=40.0,
         K_a=0.0,
+        v_max=0.5,
         W_adm_L=None,
         W_adm_R=None,
         lambda_reg=1e-6,
@@ -58,8 +37,8 @@ class DualArmAdmittanceAccelQP:
         # Grasp normals in BASE frame
         self.normal_L = self.robotL.world_vector_2_robot(self.robotL.get_grasping_data()[2])
         self.normal_R = self.robotR.world_vector_2_robot(self.robotR.get_grasping_data()[2])
-        self.normal_L = self.normal_L / (np.linalg.norm(self.normal_L) + 1e-12)
-        self.normal_R = self.normal_R / (np.linalg.norm(self.normal_R) + 1e-12)
+        self.grasping_point_L = self.robotL.world_point_2_robot(self.robotL.get_grasping_data()[0])
+        self.grasping_point_R = self.robotR.world_point_2_robot(self.robotR.get_grasping_data()[0])
 
         # Admittance parameters (shared for both arms)
         self.M_a_L = float(M_a); self.D_a_L = float(D_a); self.K_a_L = float(K_a)
@@ -82,6 +61,7 @@ class DualArmAdmittanceAccelQP:
         self.lambda_reg = float(lambda_reg)
         self.W_adm_L = np.asarray(W_adm_L, dtype=float) if W_adm_L is not None else np.eye(6)
         self.W_adm_R = np.asarray(W_adm_R, dtype=float) if W_adm_R is not None else np.eye(6)
+        self.v_n_max = float(v_max)
 
         # Perf metrics
         self._ctrl_start_wall = None
@@ -165,19 +145,19 @@ class DualArmAdmittanceAccelQP:
         )
 
     # ---------------------- control loop ----------------------
-    def run(self, ref_force=25.0):
-        """
-        ref_force : desired normal force magnitude [N]
-        M_a, D_a, K_a : optional overrides for admittance parameters (same for both arms)
-        """
+    def run(self, ref_force):
+        time.sleep(1) 
         dt = 1.0 / self.Hz
         self.build_qp(dt)
         self.control_stop = threading.Event()
-
+        self.robotL.rtde_control.zeroFtSensor()
+        self.robotR.rtde_control.zeroFtSensor()
 
         # Reset admittance states
-        self.x_n_L = 0.0; self.v_n_L = 0.0
-        self.x_n_R = 0.0; self.v_n_R = 0.0
+        self.x_n_L = 0.0
+        self.v_n_L = 0.0
+        self.x_n_R = 0.0
+        self.v_n_R = 0.0
 
         i = 0
         self._ctrl_start_wall = time.perf_counter()
@@ -199,6 +179,18 @@ class DualArmAdmittanceAccelQP:
                 F_L_vec = np.array(state_L["filtered_force"][:3], dtype=float)
                 J_L = self.robotL.get_J(q_L)
 
+                # TCP position & linear velocity in base frame
+                p_L = np.array(state_L["gripper_base"][:3], dtype=float)
+                v_L = np.array(state_L["speed"][:3], dtype=float)
+
+                # initialize grasping point if not set
+                if getattr(self, "grasping_point_L", None) is None:
+                    self.grasping_point_L = p_L.copy()
+
+                # signed distance from grasp plane along normal
+                #d_L = np.linalg.norm(p_L - self.grasping_point_L)
+                d_L = float((p_L - self.grasping_point_L) @ n_L)
+
                 # --- RIGHT state ---
                 state_R = self.robotR.get_state()
                 q_R = self.robotR.get_q()
@@ -207,24 +199,37 @@ class DualArmAdmittanceAccelQP:
                 F_R_vec = np.array(state_R["filtered_force"][:3], dtype=float)
                 J_R = self.robotR.get_J(q_R)
 
+                p_R = np.array(state_R["gripper_base"][:3], dtype=float)
+                v_R = np.array(state_R["speed"][:3], dtype=float)
+
+                if getattr(self, "grasping_point_R", None) is None:
+                    self.grasping_point_R = p_R.copy()
+
+                #d_R = np.linalg.norm(p_R - self.grasping_point_R)
+                d_R = float((p_R - self.grasping_point_R) @ n_R)
+
                 # --- normal forces & errors ---
                 F_n_L = float(n_L @ F_L_vec)
                 F_n_R = float(n_R @ F_R_vec)
                 e_n_L = ref_force - F_n_L
                 e_n_R = ref_force - F_n_R
 
-                # --- 2nd-order admittance (1D) to get v_n states ---
-                a_n_L = (e_n_L - self.D_a_L * self.v_n_L - self.K_a_L * self.x_n_L) / self.M_a_L
+                # --- 1D mass–spring–damper admittance anchored at grasp point ---
+                # M * a_n + D * v_n + K * x_n = e_n, with x_n = geometric distance d_{L/R}
+                a_n_L = (e_n_L - self.D_a_L * self.v_n_L - self.K_a_L * d_L) / self.M_a_L
                 self.v_n_L += a_n_L * dt
-                self.x_n_L += self.v_n_L * dt
+                self.x_n_L = d_L  # x_n is now true distance to grasp plane along normal
 
-                a_n_R = (e_n_R - self.D_a_R * self.v_n_R - self.K_a_R * self.x_n_R) / self.M_a_R
+                a_n_R = (e_n_R - self.D_a_R * self.v_n_R - self.K_a_R * d_R) / self.M_a_R
                 self.v_n_R += a_n_R * dt
-                self.x_n_R += self.v_n_R * dt
+                self.x_n_R = d_R
 
-                # Desired TCP velocities (linear) along -n
-                v_des_L = np.hstack([(-self.v_n_L) * n_L, np.zeros(3)])
-                v_des_R = np.hstack([(-self.v_n_R) * n_R, np.zeros(3)])
+                self.v_n_L = np.clip(self.v_n_L, -self.v_n_max, self.v_n_max)
+                self.v_n_R = np.clip(self.v_n_R, -self.v_n_max, self.v_n_max)
+
+                # Desired TCP velocities (linear) along -n (force too low -> move into the object)
+                v_des_L = np.hstack([(self.v_n_L) * -n_L, np.zeros(3)])
+                v_des_R = np.hstack([(self.v_n_R) * -n_R, np.zeros(3)])
 
                 # --- feed QP parameters ---
                 self.J_L_p.value = _freeze_sparsity(J_L)
@@ -265,26 +270,62 @@ class DualArmAdmittanceAccelQP:
                 self.robotL.speedJ(q_dot_L_cmd.tolist(), dt)
                 self.robotR.speedJ(q_dot_R_cmd.tolist(), dt)
 
-                # ==================== RAW DEBUG ====================
                 if i % 50 == 0:
-                    # Measured TCP velocity projections
-                    v_ee_L = (J_L @ q_dot_L)[:3]
-                    v_ee_R = (J_R @ q_dot_R)[:3]
+                    dp_L = p_L - self.grasping_point_L
+                    dp_R = p_R - self.grasping_point_R
+
+                    # normalize normals for scalar projections
                     nL = n_L / (np.linalg.norm(n_L) + 1e-12)
                     nR = n_R / (np.linalg.norm(n_R) + 1e-12)
-                    vprojL_des = float((-self.v_n_L) * (nL @ nL))
-                    vprojR_des = float((-self.v_n_R) * (nR @ nR))
-                    vprojL_meas = float(v_ee_L @ nL)
-                    vprojR_meas = float(v_ee_R @ nR)
 
-                    print("\n[DBG %d]" % i)
-                    print("  F_n_L=%.3f  F_n_R=%.3f" % (F_n_L, F_n_R))
-                    print("  eF_n_L=%.3f  eF_n_R=%.3f" % (e_n_L, e_n_R))
-                    print("  v_des·n  L/R = %.4f / %.4f" % (vprojL_des, vprojR_des))
-                    print("  v_tcp·n  L/R = %.4f / %.4f" % (vprojL_meas, vprojR_meas))
-                    print("  ||qdd_cmd|| L/R = %.4f / %.4f" % (np.linalg.norm(q_ddot_L_cmd), np.linalg.norm(q_ddot_R_cmd)))
-                    print("  ||qdot_cmd|| L/R = %.4f / %.4f" % (np.linalg.norm(q_dot_L_cmd), np.linalg.norm(q_dot_R_cmd)))
-                # ================= END RAW DEBUG ====================
+                    v_des_L_lin = v_des_L[:3]
+                    v_des_R_lin = v_des_R[:3]
+
+                    v_L_n = float(v_L @ nL)
+                    v_R_n = float(v_R @ nR)
+                    v_des_L_n = float(v_des_L_lin @ nL)
+                    v_des_R_n = float(v_des_R_lin @ nR)
+
+                    d_proj_L = float(dp_L @ nL)
+                    d_proj_R = float(dp_R @ nR)
+
+                    print(f"\n[DBG {i}] ================================")
+
+                    print("LEFT ARM – BASE FRAME:")
+                    print(f"  n (normal)        = {n_L}")
+                    print(f"  p_tcp             = {p_L}")
+                    print(f"  p_grasp           = {self.grasping_point_L}")
+                    print(f"  dp = p_tcp - p_g  = {dp_L}")
+                    print(f"  d_L (used)        = {d_L: .4f} m  (along -n)")
+                    print(f"  d_proj_n          = {d_proj_L: .4f} m (dp·n)")
+                    print(f"  F_vec             = {F_L_vec}")
+                    print(f"  F_n               = {F_n_L: .4f} N | F_ref = {ref_force:.2f} | e_F = {e_n_L: .4f}")
+                    print(f"  v_tcp (base)      = {v_L}")
+                    print(f"  v_tcp·n           = {v_L_n: .4f} m/s")
+                    print(f"  v_des (base)      = {v_des_L}")
+                    print(f"  v_des·n           = {v_des_L_n: .4f} m/s")
+                    print(f"  v_n_state         = {self.v_n_L: .4f} m/s")
+                    print(f"  x_n_state         = {self.x_n_L: .4f} m")
+
+                    print("\nRIGHT ARM – BASE FRAME:")
+                    print(f"  n (normal)        = {n_R}")
+                    print(f"  p_tcp             = {p_R}")
+                    print(f"  p_grasp           = {self.grasping_point_R}")
+                    print(f"  dp = p_tcp - p_g  = {dp_R}")
+                    print(f"  d_R (used)        = {d_R: .4f} m  (along -n)")
+                    print(f"  d_proj_n          = {d_proj_R: .4f} m (dp·n)")
+                    print(f"  F_vec             = {F_R_vec}")
+                    print(f"  F_n               = {F_n_R: .4f} N | F_ref = {ref_force:.2f} | e_F = {e_n_R: .4f}")
+                    print(f"  v_tcp (base)      = {v_R}")
+                    print(f"  v_tcp·n           = {v_R_n: .4f} m/s")
+                    print(f"  v_des (base)      = {v_des_R}")
+                    print(f"  v_des·n           = {v_des_R_n: .4f} m/s")
+                    print(f"  v_n_state         = {self.v_n_R: .4f} m/s")
+                    print(f"  x_n_state         = {self.x_n_R: .4f} m")
+
+                    print("============================================")
+
+
 
                 # --- log data ---
                 self.control_data.append(
@@ -293,15 +334,21 @@ class DualArmAdmittanceAccelQP:
                         "i": i,
                         "status": status,
                         "obj": self.qp.value,
+
+                        # forces
                         "F_n_L": F_n_L,
                         "F_n_R": F_n_R,
                         "ref_force": ref_force,
+
+                        # admittance states (normal 1D)
                         "x_n_L": self.x_n_L,
                         "x_n_R": self.x_n_R,
                         "v_n_L": self.v_n_L,
                         "v_n_R": self.v_n_R,
                         "a_n_L": a_n_L,
                         "a_n_R": a_n_R,
+
+                        # joint stuff
                         "q_L": q_L,
                         "q_R": q_R,
                         "q_dot_L_meas": q_dot_L,
@@ -310,9 +357,21 @@ class DualArmAdmittanceAccelQP:
                         "q_ddot_R_cmd": q_ddot_R_cmd,
                         "q_dot_L_cmd": q_dot_L_cmd,
                         "q_dot_R_cmd": q_dot_R_cmd,
-                        "solver_time": solve_dt,
+
+                        # --- base-frame metrics you care about ---
+                        "p_L": p_L,
+                        "p_R": p_R,
+                        "grasp_L": self.grasping_point_L,
+                        "grasp_R": self.grasping_point_R,
+                        "d_L": d_L,
+                        "d_R": d_R,
+                        "v_tcp_L": v_L,
+                        "v_tcp_R": v_R,
+                        "v_des_L": v_des_L,
+                        "v_des_R": v_des_R,
                     }
                 )
+
 
                 # --- perf stats ---
                 elapsed = time.perf_counter() - loop_start
@@ -359,66 +418,155 @@ class DualArmAdmittanceAccelQP:
             f"{self._total_iters / total_time:.1f} Hz"
         )
 
+
     # ---------------------- plotting ----------------------
-    def plot_force_profile(self, title_prefix="DualAdmittanceAccel2Vel_Forces"):
+    def plot_force_profile(self, title_prefix="DualAdmittanceAccel2Vel"):
+        import os
+        from datetime import datetime
+        import numpy as np
+        import matplotlib.pyplot as plt
+
         if not self.control_data:
-            print("No control_data to plot.")
+            print("[plot_force_profile] No data to plot.")
             return
-        os.makedirs("plots", exist_ok=True)
-        ts = np.array([d["t"] for d in self.control_data])
-        t = ts - ts[0]
 
-        F_n_L = np.array([d["F_n_L"] for d in self.control_data])
-        F_n_R = np.array([d["F_n_R"] for d in self.control_data])
-        ref_force = np.array([d["ref_force"] for d in self.control_data])
+        data = self.control_data
 
-        v_n_L = np.array([d["v_n_L"] for d in self.control_data])
-        v_n_R = np.array([d["v_n_R"] for d in self.control_data])
-        a_n_L = np.array([d["a_n_L"] for d in self.control_data])
-        a_n_R = np.array([d["a_n_R"] for d in self.control_data])
+        # time axis (relative)
+        t0 = data[0]["t"]
+        t = np.array([d["t"] - t0 for d in data])
 
-        obj = np.array([d["obj"] for d in self.control_data])
+        F_n_L = np.array([d["F_n_L"] for d in data])
+        F_n_R = np.array([d["F_n_R"] for d in data])
+        F_ref = np.array([d["ref_force"] for d in data])
 
-        fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
-        fig.suptitle(f"{title_prefix} – {datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+        x_n_L = np.array([d["x_n_L"] for d in data])
+        x_n_R = np.array([d["x_n_R"] for d in data])
 
+        v_n_L = np.array([d["v_n_L"] for d in data])
+        v_n_R = np.array([d["v_n_R"] for d in data])
+
+        # --- FIGURE 1: normal-direction metrics ---
+        fig1, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        fig1.suptitle(f"{title_prefix} – Normal / Admittance Metrics")
+
+        # Forces along normal
         ax = axes[0]
-        ax.plot(t, F_n_L, label="F_n_L meas")
-        ax.plot(t, F_n_R, label="F_n_R meas")
-        ax.plot(t, ref_force, "--", color="black", label="F*_n ref")
-        ax.set_ylabel("Force [N]")
+        ax.plot(t, F_n_L, label="F_n_L")
+        ax.plot(t, F_n_R, label="F_n_R")
+        ax.plot(t, F_ref, "--", label="F_ref")
+        ax.set_ylabel("Normal force [N]")
         ax.grid(True, alpha=0.3)
         ax.legend()
-        ax.set_title("Normal Force vs Ref")
 
+        # Distance along normal (x_n)
         ax = axes[1]
-        ax.plot(t, v_n_L, label="v_n L")
-        ax.plot(t, v_n_R, label="v_n R")
-        ax.set_ylabel("v_n [m/s]")
+        ax.plot(t, x_n_L, label="x_n_L (d_L)")
+        ax.plot(t, x_n_R, label="x_n_R (d_R)")
+        ax.set_ylabel("Distance along -n [m]")
         ax.grid(True, alpha=0.3)
         ax.legend()
-        ax.set_title("Admittance Normal Velocity (state)")
 
+        # Normal velocity (admittance state)
         ax = axes[2]
-        ax.plot(t, a_n_L, label="a_n L")
-        ax.plot(t, a_n_R, label="a_n R")
-        ax.set_ylabel("a_n [m/s^2]")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        ax.set_title("Admittance Normal Acceleration")
-
-        ax = axes[3]
-        ax.plot(t, obj, label="QP objective", color="tab:orange")
-        ax.set_ylabel("Objective")
-        ax.set_xlabel("Time [s]")
+        ax.plot(t, v_n_L, label="v_n_L")
+        ax.plot(t, v_n_R, label="v_n_R")
+        ax.set_ylabel("v_n [m/s]")
+        ax.set_xlabel("time [s]")
         ax.grid(True, alpha=0.3)
         ax.legend()
 
-        plt.tight_layout(rect=[0, 0.02, 1, 0.97])
-        fname = f"plots/{title_prefix.lower()}_{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}.png"
-        plt.savefig(fname, dpi=150)
-        plt.close()
-        print(f"Saved: {fname}")
+        fig1.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+        # --- FIGURE 2: base-frame metrics (poses + velocity commands) ---
+        # extract base-frame stuff
+        p_L = np.stack([d["p_L"] for d in data], axis=0)        # (N,3)
+        p_R = np.stack([d["p_R"] for d in data], axis=0)
+        grasp_L = np.stack([d["grasp_L"] for d in data], axis=0)
+        grasp_R = np.stack([d["grasp_R"] for d in data], axis=0)
+
+        d_L = np.array([d["d_L"] for d in data])
+        d_R = np.array([d["d_R"] for d in data])
+
+        v_tcp_L = np.stack([d["v_tcp_L"] for d in data], axis=0)
+        v_tcp_R = np.stack([d["v_tcp_R"] for d in data], axis=0)
+        v_des_L = np.stack([d["v_des_L"] for d in data], axis=0)
+        v_des_R = np.stack([d["v_des_R"] for d in data], axis=0)
+
+        fig2, axes2 = plt.subplots(3, 2, figsize=(12, 9), sharex=True)
+        fig2.suptitle(f"{title_prefix} – Base-frame Metrics")
+
+        # Row 1: TCP positions vs grasp positions (x,y,z)
+        labels_xyz = ["x", "y", "z"]
+        for j in range(2):  # 0 = L, 1 = R
+            ax = axes2[0, j]
+            if j == 0:
+                p = p_L
+                g = grasp_L
+                side = "LEFT"
+            else:
+                p = p_R
+                g = grasp_R
+                side = "RIGHT"
+
+            for k in range(3):
+                ax.plot(t, p[:, k], label=f"p_{labels_xyz[k]}")
+                ax.plot(t, g[:, k], "--", label=f"grasp_{labels_xyz[k]}" if k == 0 else None)
+
+            ax.set_ylabel(f"{side} TCP / grasp [m]")
+            ax.grid(True, alpha=0.3)
+            if j == 0:
+                ax.legend(ncol=3, fontsize=8)
+
+        # Row 2: distance between TCP and grasp (d_L, d_R)
+        ax = axes2[1, 0]
+        ax.plot(t, d_L, label="d_L (along -n)")
+        ax.set_ylabel("d_L [m]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        ax = axes2[1, 1]
+        ax.plot(t, d_R, label="d_R (along -n)")
+        ax.set_ylabel("d_R [m]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # Row 3: commanded vs measured TCP linear velocity in base frame (norm)
+        v_tcp_L_norm = np.linalg.norm(v_tcp_L[:, :3], axis=1)
+        v_tcp_R_norm = np.linalg.norm(v_tcp_R[:, :3], axis=1)
+        v_des_L_norm = np.linalg.norm(v_des_L[:, :3], axis=1)
+        v_des_R_norm = np.linalg.norm(v_des_R[:, :3], axis=1)
+
+        ax = axes2[2, 0]
+        ax.plot(t, v_tcp_L_norm, label="|v_tcp_L| meas")
+        ax.plot(t, v_des_L_norm, "--", label="|v_des_L| cmd")
+        ax.set_ylabel("LEFT |v| [m/s]")
+        ax.set_xlabel("time [s]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        ax = axes2[2, 1]
+        ax.plot(t, v_tcp_R_norm, label="|v_tcp_R| meas")
+        ax.plot(t, v_des_R_norm, "--", label="|v_des_R| cmd")
+        ax.set_ylabel("RIGHT |v| [m/s]")
+        ax.set_xlabel("time [s]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        fig2.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+        # --- saving ---
+        os.makedirs("plots", exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+        f1 = os.path.join("plots", f"{title_prefix}_normal_{ts}.png")
+        f2 = os.path.join("plots", f"{title_prefix}_base_{ts}.png")
+
+        fig1.savefig(f1, dpi=200)
+        fig2.savefig(f2, dpi=200)
+
+        print(f"[plot_force_profile] Saved:\n  {f1}\n  {f2}")
+
 
 
 class URImpedanceController(URForceController):
@@ -472,19 +620,25 @@ if __name__ == "__main__":
     robotL = URImpedanceController("192.168.1.33")
     robotR = URImpedanceController("192.168.1.66")
 
-    Hz = 75
+    Hz = 50
 
     # Heavier weights on linear tracking; de-emphasize orientation
-    W_adm = np.diag([0.8, 0.8, 0.8, 1e6, 1e6, 1e6])
-    lambda_reg = 0.0
+    W_adm = np.diag([1, 1, 1, 1e6, 1e6, 1e6])
+    lambda_reg = 1e-6
+    v_max = 0.05  # m/s
+
+    M = 27
+    K = 300
+    D = 2400.0 #2 * np.sqrt(M * K)
 
     ctrl = DualArmAdmittanceAccelQP(
         robotL=robotL,
         robotR=robotR,
         Hz=Hz,
-        M_a=15.0,
-        D_a=105.0,
-        K_a=100.0,
+        M_a=M,
+        D_a=D,
+        K_a=K,
+        v_max=v_max,
         W_adm_L=W_adm,
         W_adm_R=W_adm,
         lambda_reg=lambda_reg,
@@ -504,10 +658,10 @@ if __name__ == "__main__":
         robotR.wait_until_done()
         robotL.wait_until_done()
 
-        robotL.wait_for_commands()
-        robotR.wait_for_commands()
         robotL.go_to_approach()
         robotR.go_to_approach()
+        robotL.wait_for_commands()
+        robotR.wait_for_commands()
         robotL.wait_until_done()
         robotR.wait_until_done()
 

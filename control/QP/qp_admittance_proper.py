@@ -154,7 +154,7 @@ class DualArmAdmittanceAccelQP:
         )
 
     # ---------------------- control loop ----------------------
-    def run(self, ref_force=25.0, M_a=None, D_a=None, K_a=None):
+    def run(self, ref_force=25.0):
         """
         ref_force : desired normal force magnitude [N]
         M_a, D_a, K_a : optional overrides for admittance parameters (same for both arms)
@@ -163,13 +163,6 @@ class DualArmAdmittanceAccelQP:
         self.build_qp(dt)
         self.control_stop = threading.Event()
 
-        # Override admittance params for this run if provided
-        if M_a is not None:
-            self.M_a_L = self.M_a_R = float(M_a)
-        if D_a is not None:
-            self.D_a_L = self.D_a_R = float(D_a)
-        if K_a is not None:
-            self.K_a_L = self.K_a_R = float(K_a)
 
         # Reset admittance states
         self.x_n_L = 0.0
@@ -545,7 +538,7 @@ if __name__ == "__main__":
         robotR.wait_until_done()
 
         # Run acceleration-level admittance QP controller
-        ctrl.run(ref_force=25.0, M_a=10.0, D_a=50.0, K_a=500.0)
+        ctrl.run(ref_force=25.0)
 
         # Plot simple force profile
         ctrl.plot_force_profile()
