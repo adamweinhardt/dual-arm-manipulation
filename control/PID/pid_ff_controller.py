@@ -161,14 +161,29 @@ class URForceController(URController):
             np.array(normal_vector),
         )
     
-    def get_box_dimension(self):
+    def get_grasping_data_both(self):
         while not self._update_grasping_data():
             time.sleep(0.01)
 
         box_id = list(self.current_grasping_data.keys())[0]
         g = self.current_grasping_data[box_id]
 
-        return np.linalg.norm(g.get("grasping_point0") - g.get("grasping_point1"))
+        grasping_point0 = g.get("grasping_point0")
+        approach_point0 = g.get("approach_point0")
+        normal_vector0 = g.get("normal0")
+        grasping_point1 = g.get("grasping_point1")
+        approach_point1 = g.get("approach_point1")
+        normal_vector1 = g.get("normal1")
+
+
+        return (
+            np.array(grasping_point0),
+            np.array(grasping_point1),
+            np.array(approach_point0),
+            np.array(approach_point1),
+            np.array(normal_vector0),
+            np.array(normal_vector1),
+        )
 
     
     def box_dimensions(self):
