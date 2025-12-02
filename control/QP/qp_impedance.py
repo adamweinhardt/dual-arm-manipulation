@@ -21,11 +21,9 @@ class URImpedanceController(URForceController):
     def __init__(self, ip, K):
         super().__init__(ip)
         self.K = np.asarray(K, dtype=float)
-        self.pin_model = pin.buildModelFromUrdf("ur5/UR5e.urdf")
+        self.pin_model = pin.buildModelFromUrdf("utils/ur5/UR5e.urdf")
         self.pin_data = self.pin_model.createData()
         self.pin_frame_id = self.pin_model.getFrameId("tool0")
-        grasping_point, _, self.normal = self.get_grasping_data()
-        self.grasping_point = self.world_point_2_robot(grasping_point)
 
     # state
     def get_q(self):
@@ -72,47 +70,22 @@ class URImpedanceController(URForceController):
                         rel_reg: float = 1e-3,
                         abs_reg: float = 1e-3,
                         return_info: bool = False):
-        """
-        Robust computation of operational-space inertia and its inverse.
+        X = solve(M, J.T)
 
-            Λ      = (J M^{-1} J^T)^-1
-            Λ^{-1} =  J M^{-1} J^T   (with eigenvalue-based regularization)
+        A = J @ X 
 
-        Steps:
-        1) X = M^{-1} J^T              via solve(M, J.T)
-        2) A = J X = J M^{-1} J^T
-        3) symmetrize A
-        4) eigendecompose A
-        5) clamp small eigenvalues
-        6) reconstruct:
-            Λ^{-1} = Q diag(eigvals_reg) Q^T
-            Λ      = Q diag(1/eigvals_reg) Q^T
-        """
-
-        # 1) Solve M X = J^T instead of forming M^{-1}
-        X = solve(M, J.T)          # shape: (nq, 6)
-
-        # 2) A = J M^{-1} J^T = J X
-        A = J @ X                  # shape: (6, 6)
-
-        # 3) Symmetrize numerically
         A = 0.5 * (A + A.T)
 
-        # 4) Eigen-decompose A (symmetric → eigh)
-        eigvals, Q = eigh(A)       # eigvals real, Q orthonormal
+        eigvals, Q = eigh(A)       
 
         lam_max = float(np.max(eigvals))
-        # relative + absolute floor
         floor = max(abs_reg, rel_reg * lam_max)
 
-        # 5) Regularize eigenvalues
         eigvals_reg = np.maximum(eigvals, floor)
 
-        # 6a) Λ^{-1} = A_reg = Q diag(eigvals_reg) Q^T
         Lambda_inv = (Q * eigvals_reg) @ Q.T
         Lambda_inv = 0.5 * (Lambda_inv + Lambda_inv.T)
 
-        # 6b) Λ = A_reg^{-1} = Q diag(1/eigvals_reg) Q^T
         inv_eigs = 1.0 / eigvals_reg
         Lambda = (Q * inv_eigs) @ Q.T
         Lambda = 0.5 * (Lambda + Lambda.T)
@@ -134,19 +107,16 @@ class URImpedanceController(URForceController):
         K = 0.5 * (K + K.T)
         L = 0.5 * (Lambda + Lambda.T)
 
-        # --- sqrt(K) safely ---
         wK, VK = np.linalg.eigh(K)
-        wK = np.maximum(wK, 1e-12)                  # tiny floor
+        wK = np.maximum(wK, 1e-12)            
         S_K = (VK * np.sqrt(wK)) @ VK.T
         S_K = 0.5 * (S_K + S_K.T)
 
-        # --- sqrt(Lambda) safely ---
         wL, VL = np.linalg.eigh(L)
         wL = np.maximum(wL, 1e-12)
         S_L = (VL * np.sqrt(wL)) @ VL.T
         S_L = 0.5 * (S_L + S_L.T)
 
-        # --- D = S_L S_K + S_K S_L ---
         D = S_L @ S_K + S_K @ S_L
         D = 0.5 * (D + D.T)
 
@@ -188,11 +158,57 @@ class DualArmImpedanceQP:
         self.control_data = []
         self._should_stop = threading.Event()
 
-        self.box_dimensions = np.linalg.norm(self.robot_L.get_grasping_data()[0] - self.robot_R.get_grasping_data()[0])
-        self.normal_L = self.robot_L.get_grasping_data()[2]
-        self.normal_R = self.robot_R.get_grasping_data()[2]
-
         self._build_qp(self.dt)
+
+    def _init_grasping_data(self):
+        self.grasping_point_L_world, _, self.normal_L_world = self.robot_L.get_grasping_data()
+        self.grasping_point_L_base = self.robot_L.world_point_2_robot(self.grasping_point_L_world)
+        self.normal_L_base = self.robot_L.world_vector_2_robot(self.normal_L_world)
+
+        self.grasping_point_R_world, _, self.normal_R_world = self.robot_R.get_grasping_data()
+        self.grasping_point_R_base = self.robot_R.world_point_2_robot(self.grasping_point_R_world)
+        self.normal_R_base = self.robot_R.world_vector_2_robot(self.normal_R_world)
+
+        nL = np.linalg.norm(self.normal_L_base); nR = np.linalg.norm(self.normal_R_base)
+        if nL > 1e-12: self.normal_L_base = self.normal_L_base / nL
+        if nR > 1e-12: self.normal_R_base = self.normal_R_base / nR
+
+    def _compute_rotational_offset_from_traj(self, robot, R_box, grasping_point, grasping_point_other, R_WG0):
+
+        # --- 1. Transform grasping points & orientation from BASE -> WORLD ---
+        def base_to_world(p_base):
+            p4 = np.append(p_base, 1.0)
+            return (robot.T_r2w @ p4)[:3]
+
+        grasping_point_W        = base_to_world(grasping_point)
+        grasping_point_other_W  = base_to_world(grasping_point_other)
+
+        # rotation part of base→world
+        R_r2w = robot.T_r2w[:3, :3]
+        # transform orientation from base to world
+        R_WG0_W = R_r2w @ R_WG0
+
+        # --- 2. Initialize box frame geometry (in WORLD) ---
+        robot._init_box_frame_and_grasp(grasping_point_W, grasping_point_other_W, R_WG0_W)
+
+        # --- 3. Build relative rotation sequence ---
+        T = len(R_box)
+        R_box0 = R_box[0]                    # WORLD <- B0 at t=0
+        R_B0B  = R_box @ R_box0.T            # (T,3,3) B_t <- B_0
+
+        # --- 4. Tool offset in box frame ---
+        offset = np.array([-0.055, 0.0, 0.0]) if robot.robot_id == 0 else np.array([0.055, 0.0, 0.0])
+        lever  = robot._r_B + offset
+
+        # --- 5. Compute rotational offset in box frame, then to WORLD ---
+        delta_p_rot_B = (R_B0B - np.eye(3)) @ lever
+        delta_p_rot_W = (robot._R_WB0 @ delta_p_rot_B.reshape(T,3,1)).reshape(T,3)
+
+        # --- 6. Convert WORLD offsets -> BASE frame ---
+        R_w2r = R_r2w.T
+        delta_p_rot_base = (R_w2r @ delta_p_rot_W.T).T
+
+        return delta_p_rot_base
 
 
     def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
@@ -213,16 +229,11 @@ class DualArmImpedanceQP:
         self.p_ref_R, self.v_ref_R = np.zeros_like(p_box), np.zeros_like(v_box)
         self.R_ref_R, self.w_ref_R = np.zeros_like(R_box), np.zeros_like(w_box)
 
-        # Geometry: single side length (distance between the two faces being grasped)
-        L = float(self.box_dimensions)
         R_box0 = R_box[0]  # world <- B0
 
-        nL_W = np.array(self.normal_L, dtype=float)
-        nR_W = np.array(self.normal_R, dtype=float)
+        rot_offset_L = self._compute_rotational_offset_from_traj(self.robot_L, R_box, grasping_point_L, grasping_point_R, grasping_R_L)
+        rot_offset_R = self._compute_rotational_offset_from_traj(self.robot_R, R_box, grasping_point_R, grasping_point_L, grasping_R_R)
 
-        # Lever arms in the initial box frame (fixed in B0)
-        rL_B0 =  L * (R_box0.T @ nL_W)
-        rR_B0 = - L * (R_box0.T @ nR_W)
 
         # ---------- keep your loop shape ----------
         for t in range(self.traj_len):
@@ -233,15 +244,13 @@ class DualArmImpedanceQP:
             self.R_ref_L[t] = R_rel @ R0_L
             self.w_ref_L[t] = w_box[t]
             # Right
-            self.p_ref_R[t] = p0_R + p_box[t]
-            self.v_ref_R[t] = v_box[t]
+            self.p_ref_R[t] = p0_R + p_box[t] * [1, 1, 1]
+            self.v_ref_R[t] = v_box[t] * [1, 1, 1]
             self.R_ref_R[t] = R_rel @ R0_R
             self.w_ref_R[t] = w_box[t]
 
-            # Universal 3D rotational offsets in world:
-            # Δp_a^W(t) = (R_box[t] - R_box0) @ r_a^B0
-            self.p_ref_L[t] += (R_box[t] - R_box0) @ rL_B0
-            self.p_ref_R[t] += (R_box[t] - R_box0) @ rR_B0
+            self.p_ref_L[t] += rot_offset_L[t]
+            self.p_ref_R[t] += rot_offset_R[t]
 
     def _build_qp(self, dt):
         n = 6
@@ -310,8 +319,8 @@ class DualArmImpedanceQP:
 
         start_p_L = self.robot_L.get_state()["gripper_base"][:3]
         start_p_R = self.robot_R.get_state()["gripper_base"][:3]
-        grasping_point_L = self.robot_L.grasping_point
-        grasping_point_R = self.robot_R.grasping_point
+        grasping_point_L = self.grasping_point_L_base
+        grasping_point_R = self.grasping_point_R_base
         grasping_R_L = RR.from_rotvec(self.robot_L.get_state()["pose"][3:6]).as_matrix()
         grasping_R_R = RR.from_rotvec(self.robot_R.get_state()["pose"][3:6]).as_matrix()
         self._ctrl_start_wall = time.perf_counter()
@@ -339,8 +348,8 @@ class DualArmImpedanceQP:
                 Lam_L, Lam_inv_L = self.robot_L.get_Lambda_and_inv(J_L, M_L)
                 D_L     = self.robot_L.get_D(self.robot_L.K, Lam_L)
 
-                if elapsed < 4.0:
-                    alpha = elapsed / 4.0
+                if elapsed < 3:
+                    alpha = elapsed / 3
                     p_ref_L = start_p_L + alpha * (grasping_point_L - start_p_L)
                     R_ref_L = grasping_R_L
                     v_ref_L, w_ref_L = np.zeros(3), np.zeros(3)
@@ -352,6 +361,7 @@ class DualArmImpedanceQP:
                     if not traj_initialized:
                         print("Loading trajectory references...")
                         self._load_refs(grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R)
+                        time.sleep(0.1)
                         traj_initialized = True
                         t_idx = 0
                     
@@ -710,7 +720,7 @@ if __name__ == "__main__":
     robot_R = URImpedanceController("192.168.1.66", K=K)
 
     # Weights
-    W_imp = diag6([1.0, 1.0, 1.0, 0.6, 0.6, 0.6])
+    W_imp = diag6([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])
     lambda_reg = 1e-6
 
     traj_path = "motion_planner/trajectories_old/twist.npz"
@@ -738,6 +748,8 @@ if __name__ == "__main__":
         robot_L.wait_for_commands(); robot_R.wait_for_commands()
         robot_L.wait_until_done(); robot_R.wait_until_done()
         
+        ctrl._init_grasping_data()
+
         print("Moving to Approach...")
         robot_L.go_to_approach(); robot_R.go_to_approach()
         robot_L.wait_for_commands(); robot_R.wait_for_commands()

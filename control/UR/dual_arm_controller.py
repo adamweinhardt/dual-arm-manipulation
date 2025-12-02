@@ -10,22 +10,11 @@ from ur_controller import URController
 
 class DualArmController:
     def __init__(self, left_ip, right_ip):
-        """Initialize dual arm controller
-
-        Args:
-            left_ip: IP address of left robot
-            right_ip: IP address of right robot
-            publish_states: Whether to publish robot states via ZMQ
-            left_port: ZMQ port for left robot state publishing
-            right_port: ZMQ port for right robot state publishing
-        """
-        # Initialize robots with state publishing if enabled
         self.left = URController(
             left_ip,
         )
         self.right = URController(right_ip)
 
-    # === Basic Coordinated Commands ===
     def go_home(self):
         """Move both arms to home position"""
         self.left.go_home()
@@ -58,7 +47,6 @@ class DualArmController:
         self.left.moveJ(left_joints)
         self.right.moveJ(right_joints)
 
-    # === Synchronized Waiting ===
     def wait_for_all(self):
         """Wait until both arms finish all queued commands"""
         self.left.wait_for_commands()
@@ -77,7 +65,6 @@ class DualArmController:
 
     def execute_grasping_from_stream(self, grasping_port=5557, timeout=30.0):
         """Subscribe to grasping points and execute coordinated movement"""
-        # ZMQ subscriber for grasping points
         context = zmq.Context()
         subscriber = context.socket(zmq.SUB)
         subscriber.connect(f"tcp://localhost:{grasping_port}")
@@ -85,7 +72,6 @@ class DualArmController:
         subscriber.setsockopt(zmq.CONFLATE, 1)  # Keep only latest message
 
         try:
-            # Wait for grasping points
             print("Waiting for grasping points...")
 
             start_time = time.time()
@@ -105,7 +91,6 @@ class DualArmController:
                 print(f"Timeout: No grasping points received in {timeout}s")
                 return False
 
-            # Get the first box's grasping points
             box_id, grasp_info = next(iter(grasping_data.items()))
 
             print(f"\n=== Executing Grasp for Box {box_id} ===")
@@ -171,13 +156,11 @@ def run_test_case():
         dual.wait_for_all()
         print("Both arms at home")
 
-        # Test offset movement
         print("Testing offset movement...")
         dual.move_L_offset([0.05, 0, -0.05, 0, 0, 0])
         dual.wait_for_all()
         print("Offset movement complete")
 
-        # Keep running for state publishing test
         print("Publishing states for 10 seconds...")
         time.sleep(10)
 
@@ -193,17 +176,14 @@ def run_grasping_case():
     )
 
     try:
-        # Home both arms first
         print("Homing robots...")
         dual.go_home()
         dual.wait_for_all()
         print("Both arms at home")
 
-        # Execute grasping from stream
         success = dual.execute_grasping_from_stream()
 
         if success:
-            # Return home
             print("Returning to home...")
             dual.go_home()
             dual.wait_for_all()
