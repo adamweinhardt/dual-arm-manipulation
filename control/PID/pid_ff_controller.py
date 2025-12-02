@@ -16,8 +16,6 @@ from utils.utils import (
     _assert_rotmat,
 )
 
-
-
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
 
@@ -385,18 +383,12 @@ class URForceController(URController):
                     R_B0B = _assert_rotmat(
                         "R_B0B(my traj)", self.rot_updates[trajectory_index]
                     )
-                    # half_dim = self.box_dimension / 2.0
-                    # if self.robot_id == 0:
-                    #     offset = [-half_dim, 0, 0]
-                    # else:
-                    #     offset = [half_dim, 0, 0]
 
                     if self.robot_id == 0:
                         offset = [-0.055, 0, 0]
                     else:
                         offset = [0.055, 0, 0]
 
-                    # offset = [0,0,0]
                     delta_p_rot_B = (R_B0B - np.eye(3)) @ (self._r_B + offset)
                     delta_p_rot_W = self._R_WB0 @ delta_p_rot_B
                     self.reference_position = (
@@ -561,15 +553,6 @@ class URForceController(URController):
         super().disconnect
 
     def save_run_data(self, directory="runs"):
-        """
-        Saves all run parameters and time-series control data for post-processing.
-        The data is saved to a compressed .npz file containing both metadata
-        and arrays derived from self.control_data.
-
-        Data is organized into:
-        - Metadata (scalar parameters and initial state)
-        - Time-series arrays (all keys from self.control_data)
-        """
         if not self.control_data:
             print("No control data to save.")
             return
@@ -649,15 +632,6 @@ class URForceController(URController):
         print(f"Control run data saved successfully to: {filename}")
 
     def plot_PID(self):
-        """
-        Plot Force PID, Pose PID, and Feed-Forward Pose PID (P/I/D) per axis over time,
-        plus summed P/I/D (Force + Pose + Feed-Forward). Saves to plots/ directory.
-
-        Layout (3 rows x 4 cols):
-        Row 1:  Force P   | Pose P    | FF Pose P | SUM P
-        Row 2:  Force I   | Pose I    | FF Pose I | SUM I
-        Row 3:  Force D   | Pose D    | FF Pose D | SUM D
-        """
         if not self.control_data:
             print("No data to plot")
             return
@@ -771,7 +745,6 @@ class URForceController(URController):
         print(f"PID plot saved: {filename}")
 
     def plot_data3D(self):
-        """Generate comprehensive plots for 6DOF control data including rotation tracking + feedforward outputs"""
         if not self.control_data:
             print("No data to plot")
             return

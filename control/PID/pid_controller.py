@@ -21,11 +21,9 @@ def flip_y_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
     assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), \
         "Expected rot_matrices with shape (N, 3, 3)"
 
-    # Convert to rotation vectors
     r = R.from_matrix(rot_matrices)
-    rotvecs = r.as_rotvec()        # shape (N, 3)
+    rotvecs = r.as_rotvec() 
 
-    # Flip only the Y component
     rotvecs[:, 1] *= -1.0
 
     # Back to matrices
@@ -954,10 +952,6 @@ class URForceController(URController):
         print(f"PID plot saved: {filename}")
 
     def plot_data3D(self):
-        """Five-column dashboard:
-        Force | Position | Rotation | Torque | Summary
-        Rows: (1) reference vs measurement, (2) errors, (3) outputs
-        """
         if not self.control_data:
             print("No data to plot")
             return

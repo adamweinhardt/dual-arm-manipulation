@@ -17,15 +17,11 @@ from control.PID.pid_ff_controller import URForceController
 from utils.utils import _freeze_sparsity, _as_rowvec_1d, short_arc_log, diag6
 
 
-# ==============================
-#   UR Impedance Controller
-#   (unchanged; keep for ref-tracking)
-# ==============================
 class URImpedanceController(URForceController):
     def __init__(self, ip, K):
         super().__init__(ip)
         self.K = np.asarray(K, dtype=float)
-        self.pin_model = pin.buildModelFromUrdf("ur5/UR5e.urdf")
+        self.pin_model = pin.buildModelFromUrdf("utils/ur5/UR5e.urdf")
         self.pin_data = self.pin_model.createData()
         self.pin_frame_id = self.pin_model.getFrameId("tool0")
 
@@ -35,7 +31,6 @@ class URImpedanceController(URForceController):
     def get_qdot(self):
         return np.array(self.rtde_receive.getActualQd(), dtype=float)
 
-    # --- UR-side dynamics (optional; kept) ---
     def get_J_ur(self, q):
         J_flat = self.rtde_control.getJacobian(q.tolist())
         return np.array(J_flat, dtype=float).reshape((6, 6))
@@ -49,7 +44,6 @@ class URImpedanceController(URForceController):
         M = np.array(M_flat, dtype=float).reshape((6, 6))
         return 0.5 * (M + M.T)
     
-    # --- Pinocchio Jacobians/dynamics (used) ---
     def get_J(self, q):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
@@ -69,7 +63,6 @@ class URImpedanceController(URForceController):
         M = pin.crba(self.pin_model, self.pin_data, q)
         return np.asarray(0.5 * (M + M.T))
 
-    # --- Impedance wrench<->accel mapping ---
     def get_Lambda_and_inv(self, J, M, rel_reg=1e-3, abs_reg=1e-3):
         X = solve(M, J.T)
         A = J @ X
@@ -110,10 +103,6 @@ class URImpedanceController(URForceController):
         return D @ Xd_err + K @ X_err
 
 
-# ================================================================
-# Dual-arm controller: keep impedance tracking,
-# swap grasp admittance with accel->vel mass–spring–damper
-# ================================================================
 class DualArmImpedanceAdmittanceQP:
     def __init__(
         self,
@@ -121,14 +110,11 @@ class DualArmImpedanceAdmittanceQP:
         robot_R: URImpedanceController,
         Hz: int,
         trajectory_npz_path: str,
-        # weights for impedance (same)
         W_imp_L=None,
         W_imp_R=None,
-        # weights for admittance velocity tracking (re-using grasp weight slots)
         W_grasp_L=None,
         W_grasp_R=None,
         lambda_reg: float = 1e-6,
-        # --- NEW: admittance (1D along grasp normal) params ---
         M_a: float = 3.0,
         D_a: float = 40.0,
         K_a: float = 0.0,
@@ -140,7 +126,6 @@ class DualArmImpedanceAdmittanceQP:
         self.Hz = int(Hz)
         self.dt = 1.0 / float(self.Hz)
 
-        # --- Admittance parameters (shared per-arm; 1D along normal) ---
         self.M_a_L = float(M_a); self.D_a_L = float(D_a); self.K_a_L = float(K_a)
         self.M_a_R = float(M_a); self.D_a_R = float(D_a); self.K_a_R = float(K_a)
         self.v_max = float(v_max)
@@ -150,15 +135,12 @@ class DualArmImpedanceAdmittanceQP:
         self.data = np.load(self._npz_path)
         self.traj_len = int(self.data["position"].shape[0])
 
-        # Limits
         self.joint_pose_limit  = np.deg2rad(360.0)
         self.joint_speed_limit = np.deg2rad(180.0)
         self.joint_accel_limit = np.deg2rad(120.0)
 
-        # QP Weights
         self.W_imp_L = np.asarray(W_imp_L, dtype=float) if W_imp_L is not None else np.eye(6)
         self.W_imp_R = np.asarray(W_imp_R, dtype=float) if W_imp_R is not None else np.eye(6)
-        # interpret these as "velocity tracking" (admittance) weights
         self.W_grasp_L_np = np.asarray(W_grasp_L, dtype=float) if W_grasp_L is not None else np.zeros((6,6))
         self.W_grasp_R_np = np.asarray(W_grasp_R, dtype=float) if W_grasp_R is not None else np.zeros((6,6))
         self.lambda_reg = float(lambda_reg)
@@ -166,7 +148,6 @@ class DualArmImpedanceAdmittanceQP:
         self.control_data = []
         self._should_stop = threading.Event()
         
-        # Perf metrics
         self.log_every_s = 1.0
         self._ctrl_start_wall = None
         self._last_log_wall = None
@@ -178,13 +159,11 @@ class DualArmImpedanceAdmittanceQP:
         self._total_solver_time = 0.0
         self._total_deadline_miss = 0
 
-        # Admittance states (normal direction)
         self.x_n_L = 0.0; self.v_n_L = 0.0
         self.x_n_R = 0.0; self.v_n_R = 0.0
 
         self.build_qp(self.dt)
 
-    # --------- helper: grasp points + normals (BASE frame) ----------
     def _init_grasping_data(self):
         self.grasping_point_L_world, _, self.normal_L_world = self.robotL.get_grasping_data()
         self.grasping_point_L_base = self.robotL.world_point_2_robot(self.grasping_point_L_world)
@@ -194,19 +173,15 @@ class DualArmImpedanceAdmittanceQP:
         self.grasping_point_R_base = self.robotR.world_point_2_robot(self.grasping_point_R_world)
         self.normal_R_base = self.robotR.world_vector_2_robot(self.normal_R_world)
 
-        # normalize for safety
         nL = np.linalg.norm(self.normal_L_base); nR = np.linalg.norm(self.normal_R_base)
         if nL > 1e-12: self.normal_L_base = self.normal_L_base / nL
         if nR > 1e-12: self.normal_R_base = self.normal_R_base / nR
 
-        # box dimension used before (kept if needed elsewhere)
-        self.box_dimensions = np.linalg.norm(self.grasping_point_L_base - self.grasping_point_R_base)
 
-    # --------- load reference trajectory for impedance (unchanged) ----------
     def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
-        p_box = self.data["position"]            # (T,3) displacement of box center from t=0
+        p_box = self.data["position"]            # (T,3) 
         v_box = self.data["linear_velocity"]     # (T,3)
-        R_box = self.data["rotation_matrices"]   # (T,3,3) absolute; R_box[0] is initial
+        R_box = self.data["rotation_matrices"]   # (T,3,3)
         w_box = self.data["angular_velocity"]    # (T,3)
 
         # LEFT init
@@ -221,18 +196,16 @@ class DualArmImpedanceAdmittanceQP:
         
         R_box0 = R_box[0]
         for t in range(self.traj_len):
-            # Left (same as before)
             self.p_ref_L[t] = p0_L + p_box[t]
             self.v_ref_L[t] = v_box[t]
             self.R_ref_L[t] = (R_box[t] @ R_box0.T) @ R0_L
             self.w_ref_L[t] = w_box[t]
-            # Right (mirror x only, like before)
+
             self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
             self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
             self.R_ref_R[t] = (R_box[t] @ R_box0.T) @ R0_R
             self.w_ref_R[t] = w_box[t] 
 
-    # --------- QP (unchanged form): accel var + impedance accel + admittance vel ----------
     def build_qp(self, dt):
         n = 6
         self.qddot_L = cp.Variable(n, name="qddot_L")
@@ -245,8 +218,8 @@ class DualArmImpedanceAdmittanceQP:
         self.qdot_L_p = cp.Parameter(n, name="qdot_L")
         
         # Targets
-        self.a_des_L_p = cp.Parameter(6, name="a_des_L")        # Impedance Target (Accel)
-        self.xdot_star_L = cp.Parameter(6, name="xdot_star_L")  # Admittance Target (Vel)
+        self.a_des_L_p = cp.Parameter(6, name="a_des_L")        
+        self.xdot_star_L = cp.Parameter(6, name="xdot_star_L")  
         
         self.J_R_p = cp.Parameter((6, n), name="J_R")
         self.J_dot_R_p = cp.Parameter((6, n), name="J_dot_R")
@@ -265,7 +238,6 @@ class DualArmImpedanceAdmittanceQP:
         dt_c  = cp.Constant(float(dt))
         dt2_c = cp.Constant(float(0.5 * dt * dt))
 
-        # --- Next-step states ---
         q_next_L     = self.q_L_p + self.qdot_L_p * dt_c + self.qddot_L * dt2_c
         q_dot_next_L = self.qdot_L_p + self.qddot_L * dt_c
         
@@ -277,7 +249,7 @@ class DualArmImpedanceAdmittanceQP:
         e_imp_L = self.J_L_p @ self.qddot_L + self.J_dot_L_p @ self.qdot_L_p - self.a_des_L_p
         e_imp_R = self.J_R_p @ self.qddot_R + self.J_dot_R_p @ self.qdot_R_p - self.a_des_R_p
         
-        # Admittance: match desired twist velocity at next step
+        # Admittance: match desired twist velocity
         x_dot_next_L = self.J_L_p @ q_dot_next_L
         e_grasp_L    = x_dot_next_L - self.xdot_star_L
 
@@ -304,9 +276,7 @@ class DualArmImpedanceAdmittanceQP:
                               adaptive_rho=True, adaptive_rho_interval=20, polish=True,
                               check_termination=10, warm_start=True)
 
-    # =====================
-    #         RUN
-    # =====================
+
     def run(self):
         time.sleep(0.5)
         dt = 1.0 / self.Hz
@@ -316,19 +286,17 @@ class DualArmImpedanceAdmittanceQP:
         traj_initialized = False
 
         # Init grasp data/normals
-        self._init_grasping_data()
+        # TODO: should be right before go to approach
 
         # Reset admittance states
         self.x_n_L = 0.0; self.v_n_L = 0.0
         self.x_n_R = 0.0; self.v_n_R = 0.0
 
-        # Init start positions for traj interp
         start_p_L = self.robotL.get_state()["gripper_base"][:3]
         start_p_R = self.robotR.get_state()["gripper_base"][:3]
         grasping_R_L = RR.from_rotvec(self.robotL.get_state()["pose"][3:6]).as_matrix()
         grasping_R_R = RR.from_rotvec(self.robotR.get_state()["pose"][3:6]).as_matrix()
 
-        # zero FT (optional; keep behavior consistent with new controller)
         try:
             self.robotL.rtde_control.zeroFtSensor()
             self.robotR.rtde_control.zeroFtSensor()
@@ -346,7 +314,6 @@ class DualArmImpedanceAdmittanceQP:
                     print("Trajectory completed.")
                     break
 
-                # --- state LEFT ---
                 state_L = self.robotL.get_state()
                 p_L, v_L = np.array(state_L["gripper_base"][:3]), np.array(state_L["speed"][:3])
                 R_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
@@ -357,7 +324,6 @@ class DualArmImpedanceAdmittanceQP:
                 J_L = self.robotL.get_J(q_L)
                 J_dot_L = self.robotL.get_Jdot(q_L, qdot_L)
 
-                # --- state RIGHT ---
                 state_R = self.robotR.get_state()
                 p_R, v_R = np.array(state_R["gripper_base"][:3]), np.array(state_R["speed"][:3])
                 R_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
@@ -368,9 +334,9 @@ class DualArmImpedanceAdmittanceQP:
                 J_R = self.robotR.get_J(q_R)
                 J_dot_R = self.robotR.get_Jdot(q_R, qdot_R)
 
-                # ==========================================================
-                # 1) IMPEDANCE: trajectory tracking (unchanged)
-                # ==========================================================
+                # ==================================
+                # 1) IMPEDANCE: trajectory tracking 
+                # ===================================
                 t_model_start = time.perf_counter()
                 
                 if elapsed < 5:
@@ -395,7 +361,6 @@ class DualArmImpedanceAdmittanceQP:
                         R_ref_R, w_ref_R = self.R_ref_R[t_idx], self.w_ref_R[t_idx]
                         t_idx += 1
                 
-                # Desired Wrench -> Acceleration (Left)
                 M_L = self.robotL.get_M(q_L)
                 Lam_L, Lam_inv_L = self.robotL.get_Lambda_and_inv(J_L, M_L)
                 D_L = self.robotL.get_D(self.robotL.K, Lam_L)
@@ -404,7 +369,6 @@ class DualArmImpedanceAdmittanceQP:
                 f_des_L = self.robotL.wrench_desired(self.robotL.K, D_L, e_p_L, e_r_L, e_v_L, e_w_L)
                 a_des_L = Lam_inv_L @ f_des_L
 
-                # Desired Wrench -> Acceleration (Right)
                 M_R = self.robotR.get_M(q_R)
                 Lam_R, Lam_inv_R = self.robotR.get_Lambda_and_inv(J_R, M_R)
                 D_R = self.robotR.get_D(self.robotR.K, Lam_R)
@@ -413,22 +377,18 @@ class DualArmImpedanceAdmittanceQP:
                 f_des_R = self.robotR.wrench_desired(self.robotR.K, D_R, e_p_R, e_r_R, e_v_R, e_w_R)
                 a_des_R = Lam_inv_R @ f_des_R
 
-                # ==========================================================
-                # 2) ADMITTANCE (REPLACED): 1D MSD along grasp normals
-                #     -> produce desired TCP linear velocities
-                # ==========================================================
-                # Reference normal forces
+                # ========================
+                # 2) ADMITTANCE: grasping
+                # ========================
                 F_n_star = self.ref_force
                 F_n_L = float(n_L @ F_L)
                 F_n_R = float(n_R @ F_R)
                 e_n_L = F_n_star - F_n_L
                 e_n_R = F_n_star - F_n_R
 
-                # signed distance from grasp plane along +n (project TCP - grasp)
                 d_L = float((p_L - p_ref_L) @ n_L)
                 d_R = float((p_R - p_ref_R) @ n_R)
 
-                # Integrate normal-state acceleration -> velocity (clip) ; x_n is the geometric distance
                 a_n_L = (e_n_L - self.D_a_L * self.v_n_L - self.K_a_L * d_L) / max(self.M_a_L, 1e-9)
                 a_n_R = (e_n_R - self.D_a_R * self.v_n_R - self.K_a_R * d_R) / max(self.M_a_R, 1e-9)
 
@@ -437,7 +397,6 @@ class DualArmImpedanceAdmittanceQP:
                 self.x_n_L = d_L
                 self.x_n_R = d_R
 
-                # Desired TCP linear velocities along -n (push in when force too low)
                 v_star_L = ( self.v_n_L) * (-n_L)
                 v_star_R = ( self.v_n_R) * (-n_R)
 
@@ -475,7 +434,6 @@ class DualArmImpedanceAdmittanceQP:
                 status = (self.qp.status or "").lower()
                 ok = status in ("optimal", "optimal_inaccurate")
 
-                # extract accelerations; integrate to velocity command
                 if ok:
                     qddot_L_cmd = _as_rowvec_1d(self.qddot_L.value, "qddot_L", 6)
                     qddot_R_cmd = _as_rowvec_1d(self.qddot_R.value, "qddot_R", 6)
@@ -484,15 +442,12 @@ class DualArmImpedanceAdmittanceQP:
                 else:
                     qddot_L_cmd = np.zeros(6)
                     qddot_R_cmd = np.zeros(6)
-                    qdot_L_cmd = qdot_L  # hold measured
+                    qdot_L_cmd = qdot_L 
                     qdot_R_cmd = qdot_R
 
-                # --- send (UR speedJ expects target joint velocities) ---
                 self.robotL.speedJ(qdot_L_cmd.tolist(), dt)
                 self.robotR.speedJ(qdot_R_cmd.tolist(), dt)
 
-                # --- Logging (SUPerset: supports both old & new plotting) ---
-                # Original obj breakdown terms
                 e_imp_L_val = J_L @ qddot_L_cmd + J_dot_L @ qdot_L - a_des_L
                 imp_L_term = float((self.W_imp_L @ e_imp_L_val).T @ (self.W_imp_L @ e_imp_L_val))
                 
@@ -520,7 +475,6 @@ class DualArmImpedanceAdmittanceQP:
                     "e_p": e_p_R, "e_v": e_v_R, "e_w": e_w_R, "e_r": e_r_R
                 }
 
-                # Old plotting dict
                 force_data_dict = {
                     "F_L_vec": F_L,      "F_R_vec": F_R,
                     "F_L_ref": self.ref_force * n_L,  "F_R_ref": self.ref_force * n_R,
@@ -529,7 +483,6 @@ class DualArmImpedanceAdmittanceQP:
                     "F_n_L": F_n_L,      "F_n_R": F_n_R,
                 }
 
-                # Append superset log
                 self.control_data.append({
                     "t": time.time(),
                     "i": i,
@@ -541,9 +494,8 @@ class DualArmImpedanceAdmittanceQP:
                         "grasp_L": grasp_L_term, "grasp_R": grasp_R_term,
                         "reg": reg_term, "total": obj_total
                     },
-                    "force_data": force_data_dict,  # old plots use this
+                    "force_data": force_data_dict,
 
-                    # --- NEW admittance-friendly top-level keys (for new plots) ---
                     "F_n_L": F_n_L,
                     "F_n_R": F_n_R,
                     "ref_force": self.ref_force,
@@ -554,11 +506,9 @@ class DualArmImpedanceAdmittanceQP:
                     "a_n_L": a_n_L,
                     "a_n_R": a_n_R,
 
-                    # joint
                     "q_L": q_L, "q_dot_L": qdot_L, "q_ddot_L": qddot_L_cmd,
                     "q_R": q_R, "q_dot_R": qdot_R, "q_ddot_R": qddot_R_cmd,
 
-                    # base-frame metrics for new plotter
                     "p_L": p_L,
                     "p_R": p_R,
                     "grasp_L": self.grasping_point_L_base,
@@ -570,7 +520,6 @@ class DualArmImpedanceAdmittanceQP:
                     "v_des_L": xdot_star_L,
                     "v_des_R": xdot_star_R,
 
-                    # tcp bundles for old taskspace plots
                     "tcp_L": tcp_L,
                     "tcp_R": tcp_R,
                 })
@@ -1008,7 +957,6 @@ class DualArmImpedanceAdmittanceQP:
 
 
 if __name__ == "__main__":
-    # Stiffness for impedance tracking (unchanged)
     K = np.diag([10, 10, 10, 0.2, 0.2, 0.2])
     
     robot_L = URImpedanceController("192.168.1.33", K=K)
@@ -1053,6 +1001,8 @@ if __name__ == "__main__":
         robot_L.go_home(); robot_R.go_home()
         robot_L.wait_for_commands(); robot_R.wait_for_commands()
         robot_L.wait_until_done(); robot_R.wait_until_done()
+
+        ctrl._init_grasping_data()
         
         print("Moving to Approach...")
         robot_L.go_to_approach(); robot_R.go_to_approach()

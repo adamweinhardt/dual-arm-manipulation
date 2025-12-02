@@ -3,10 +3,7 @@ import threading
 import queue
 from numpy import pi
 import numpy as np
-import matplotlib.pyplot as plt
 import zmq
-import pinocchio as pin
-from pinocchio import skew
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
@@ -28,7 +25,6 @@ class URController(threading.Thread):
             self.port = 5559
             self.ee2marker_offset = np.array([0.00, 0.05753, -0.10, 0, 0, 0])
             self.ee2marker_offset_base = np.array([0.00, -0.05753, -0.10, 0, 0, 0])
-
 
         elif self.ip == "192.168.1.33":
             self.robot_id = 0
@@ -62,10 +58,6 @@ class URController(threading.Thread):
         self.T_r2w = self.robot_config #4x4 hom transform
         self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float) #rotation 3x3
         self.T_w2r = np.linalg.inv(self.T_r2w)
-        # self.R_r2w_pin = self.R_r2w @ np.array([[-1, 0, 0],
-        #                                     [ 0,-1, 0],
-        #                                     [ 0, 0, 1]])
-        
         self.R_r2w_pin = np.array([[-1, 0, 0],
                                    [ 0,-1, 0],
                                    [ 0, 0, 1]])
@@ -93,12 +85,11 @@ class URController(threading.Thread):
         # Data recording
         self.previous_force = None
         self.previous_force_world = None
-        self.alpha = 0.7
+        self.alpha = 0.75
         self.data = []
         self.forces = []
 
-        # self.fk = FastKinematics("robot_ipc_control/pose_estimation/ur5/ur5e.urdf",1,"tool0", False)
-        # Start the control thread
+        # Start threads
         self.start()
 
     def run(self):
@@ -213,7 +204,6 @@ class URController(threading.Thread):
         Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
         """
         world_point_4d = np.append(world_point, 1.0)
-        print(world_point)
 
         robot_to_world = self.T_r2w
         world_to_robot = np.linalg.inv(robot_to_world)
