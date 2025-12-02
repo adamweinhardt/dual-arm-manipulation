@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dual-arm-manipulation"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Adam Weinhardt-Kovacs", email = "wkadam9@gmail.com" }]
+dependencies = [
+  "cvxpy>=1.7,<2.0",
+  "gtsam==4.2a7",
+  "matplotlib==3.10.1",
+  "matplotlib-inline==0.1.7",
+  "numpy==1.26.4",
+  "opencv-contrib-python==4.11.0.86",
+  "opencv-python==4.11.0.86",
+  "pin==3.7.0",
+  "pyrealsense2==2.53.1.4623",
+  "PyYAML==6.0.2",
+  "pyzmq==26.3.0",
+  "robotic==0.2.2",
+  "scipy==1.15.2",
+  "torch==2.2.2",
+  "torchaudio==2.2.2",
+  "torchvision==0.17.2",
+  "ur_rtde==1.6.2",
+]

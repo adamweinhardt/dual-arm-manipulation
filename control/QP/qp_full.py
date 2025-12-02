@@ -1017,17 +1017,17 @@ if __name__ == "__main__":
     # Weights
     W_imp = diag6([1.0, 1.0, 1.0, 1e3, 1e3, 1e3])
     #W_imp = diag6([0,0,0,0,0,0])
-    W_grasp = diag6([5e1, 5e1, 5e1, 1e3, 1e3, 1e3])
+    W_grasp = diag6([5e1, 5e1, 5e1, 2e5, 2e5, 2e5])
     #W_grasp = diag6([0, 0, 0, 0, 0, 0])
     lambda_reg = 1e-6
 
     M_a = 27.0
-    K_a = 300.0
+    K_a = 400.0
     D_a = 2400.0  # or 2*sqrt(M_a*K_a)
     v_max = 0.05
-    Fn_ref = 20.0
+    Fn_ref = 25.0
 
-    traj_path = "motion_planner/trajectories_old/lift_100.npz"
+    traj_path = "motion_planner/trajectories_old/pick_and_place.npz"
     Hz = 50
 
     ctrl = DualArmImpedanceAdmittanceQP(
