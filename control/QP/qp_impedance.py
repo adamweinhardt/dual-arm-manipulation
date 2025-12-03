@@ -173,45 +173,41 @@ class DualArmImpedanceQP:
         if nL > 1e-12: self.normal_L_base = self.normal_L_base / nL
         if nR > 1e-12: self.normal_R_base = self.normal_R_base / nR
 
-    def _compute_rotational_offset_from_traj(self, robot, R_box, grasping_point, grasping_point_other, R_WG0):
+    def _compute_rotational_offset_from_traj(
+        self, robot, R_box, grasping_point_W, grasping_point_other_W, R_WG0_W
+    ):
+        # --- 1. Init box frame in WORLD (same as online controller) ---
+        robot._init_box_frame_and_grasp(
+            np.array(grasping_point_W, dtype=float),
+            np.array(grasping_point_other_W, dtype=float),
+            np.array(R_WG0_W, dtype=float),
+        )
 
-        # --- 1. Transform grasping points & orientation from BASE -> WORLD ---
-        def base_to_world(p_base):
-            p4 = np.append(p_base, 1.0)
-            return (robot.T_r2w @ p4)[:3]
-
-        grasping_point_W        = base_to_world(grasping_point)
-        grasping_point_other_W  = base_to_world(grasping_point_other)
-
-        # rotation part of base→world
-        R_r2w = robot.T_r2w[:3, :3]
-        # transform orientation from base to world
-        R_WG0_W = R_r2w @ R_WG0
-
-        # --- 2. Initialize box frame geometry (in WORLD) ---
-        robot._init_box_frame_and_grasp(grasping_point_W, grasping_point_other_W, R_WG0_W)
-
-        # --- 3. Build relative rotation sequence ---
         T = len(R_box)
-        R_box0 = R_box[0]                    # WORLD <- B0 at t=0
-        R_B0B  = R_box @ R_box0.T            # (T,3,3) B_t <- B_0
+        R_box0 = R_box[0]          # world <- B0
+        R_B0B = R_box @ R_box0.T   # (T,3,3)  B_t <- B_0
 
-        # --- 4. Tool offset in box frame ---
-        offset = np.array([-0.055, 0.0, 0.0]) if robot.robot_id == 0 else np.array([0.055, 0.0, 0.0])
-        lever  = robot._r_B + offset
+        # --- 2. Tool lever in BOX frame (same logic as baseline online code) ---
+        robot.offset = (
+            np.array([-0.055, 0.0, 0.0])
+            if robot.robot_id == 0
+            else np.array([0.055, 0.0, 0.0])
+        )
+        robot.lever = robot._r_B + robot.offset  # (3,)
 
-        # --- 5. Compute rotational offset in box frame, then to WORLD ---
-        delta_p_rot_B = (R_B0B - np.eye(3)) @ lever
-        delta_p_rot_W = (robot._R_WB0 @ delta_p_rot_B.reshape(T,3,1)).reshape(T,3)
+        # --- 3. Rotational displacement in BOX, then WORLD ---
+        delta_p_rot_B = (R_B0B - np.eye(3)) @ robot.lever              # (T,3)
+        delta_p_rot_W = (robot._R_WB0 @ delta_p_rot_B.T).T             # (T,3)
 
-        # --- 6. Convert WORLD offsets -> BASE frame ---
+        # --- 4. WORLD -> BASE (only now) ---
+        R_r2w = robot.T_r2w[:3, :3]
         R_w2r = R_r2w.T
-        delta_p_rot_base = (R_w2r @ delta_p_rot_W.T).T
+        delta_p_rot_base = (R_w2r @ delta_p_rot_W.T).T                 # (T,3)
 
         return delta_p_rot_base
 
 
-    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
+    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R, grasping_R_L_W, grasping_R_R_W):
         data  = np.load(self._npz_path)
         p_box = data["position"]            # (T,3) displacement of box center from t=0
         v_box = data["linear_velocity"]     # (T,3)
@@ -231,26 +227,38 @@ class DualArmImpedanceQP:
 
         R_box0 = R_box[0]  # world <- B0
 
-        rot_offset_L = self._compute_rotational_offset_from_traj(self.robot_L, R_box, grasping_point_L, grasping_point_R, grasping_R_L)
-        rot_offset_R = self._compute_rotational_offset_from_traj(self.robot_R, R_box, grasping_point_R, grasping_point_L, grasping_R_R)
+        delta_base_L = self._compute_rotational_offset_from_traj(
+            self.robot_L,
+            R_box,
+            self.grasping_point_L_world,
+            self.grasping_point_R_world,
+            grasping_R_L_W                
+        )
+        delta_base_R = self._compute_rotational_offset_from_traj(
+            self.robot_R,
+            R_box,
+            self.grasping_point_R_world,
+            self.grasping_point_L_world,
+            grasping_R_R_W
+        )
 
-
-        # ---------- keep your loop shape ----------
         for t in range(self.traj_len):
-            # Left
+
+            # Left (translation)
             self.p_ref_L[t] = p0_L + p_box[t]
             self.v_ref_L[t] = v_box[t]
             R_rel = R_box[t] @ R_box0.T
             self.R_ref_L[t] = R_rel @ R0_L
             self.w_ref_L[t] = w_box[t]
-            # Right
-            self.p_ref_R[t] = p0_R + p_box[t] * [1, 1, 1]
-            self.v_ref_R[t] = v_box[t] * [1, 1, 1]
+
+            # Right (mirrored)
+            self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
+            self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
             self.R_ref_R[t] = R_rel @ R0_R
             self.w_ref_R[t] = w_box[t]
 
-            self.p_ref_L[t] += rot_offset_L[t]
-            self.p_ref_R[t] += rot_offset_R[t]
+            self.p_ref_L[t] += delta_base_L[t]
+            self.p_ref_R[t] += delta_base_R[t]
 
     def _build_qp(self, dt):
         n = 6
@@ -323,6 +331,8 @@ class DualArmImpedanceQP:
         grasping_point_R = self.grasping_point_R_base
         grasping_R_L = RR.from_rotvec(self.robot_L.get_state()["pose"][3:6]).as_matrix()
         grasping_R_R = RR.from_rotvec(self.robot_R.get_state()["pose"][3:6]).as_matrix()
+        grasping_R_L_W = RR.from_rotvec(self.robot_L.get_state()["pose_world"][3:6]).as_matrix()
+        grasping_R_R_W = RR.from_rotvec(self.robot_R.get_state()["pose_world"][3:6]).as_matrix()
         self._ctrl_start_wall = time.perf_counter()
 
 
@@ -360,7 +370,7 @@ class DualArmImpedanceQP:
                 else:
                     if not traj_initialized:
                         print("Loading trajectory references...")
-                        self._load_refs(grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R)
+                        self._load_refs(grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R, grasping_R_L_W, grasping_R_R_W)
                         time.sleep(0.1)
                         traj_initialized = True
                         t_idx = 0

@@ -121,8 +121,8 @@ class DualArmImpedanceAdmittanceQP:
         v_max: float = 0.05,
         ref_force: float = 20.0,
     ):
-        self.robotL = robot_L
-        self.robotR = robot_R
+        self.robot_L = robot_L
+        self.robot_R = robot_R
         self.Hz = int(Hz)
         self.dt = 1.0 / float(self.Hz)
 
@@ -165,46 +165,98 @@ class DualArmImpedanceAdmittanceQP:
         self.build_qp(self.dt)
 
     def _init_grasping_data(self):
-        self.grasping_point_L_world, _, self.normal_L_world = self.robotL.get_grasping_data()
-        self.grasping_point_L_base = self.robotL.world_point_2_robot(self.grasping_point_L_world)
-        self.normal_L_base = self.robotL.world_vector_2_robot(self.normal_L_world)
+        self.grasping_point_L_world, _, self.normal_L_world = self.robot_L.get_grasping_data()
+        self.grasping_point_L_base = self.robot_L.world_point_2_robot(self.grasping_point_L_world)
+        self.normal_L_base = self.robot_L.world_vector_2_robot(self.normal_L_world)
 
-        self.grasping_point_R_world, _, self.normal_R_world = self.robotR.get_grasping_data()
-        self.grasping_point_R_base = self.robotR.world_point_2_robot(self.grasping_point_R_world)
-        self.normal_R_base = self.robotR.world_vector_2_robot(self.normal_R_world)
+        self.grasping_point_R_world, _, self.normal_R_world = self.robot_R.get_grasping_data()
+        self.grasping_point_R_base = self.robot_R.world_point_2_robot(self.grasping_point_R_world)
+        self.normal_R_base = self.robot_R.world_vector_2_robot(self.normal_R_world)
 
         nL = np.linalg.norm(self.normal_L_base); nR = np.linalg.norm(self.normal_R_base)
         if nL > 1e-12: self.normal_L_base = self.normal_L_base / nL
         if nR > 1e-12: self.normal_R_base = self.normal_R_base / nR
 
+    def _compute_rotational_offset_from_traj(
+        self, robot, R_box, grasping_point_W, grasping_point_other_W, R_WG0_W
+    ):
+        robot._init_box_frame_and_grasp(
+            np.array(grasping_point_W, dtype=float),
+            np.array(grasping_point_other_W, dtype=float),
+            np.array(R_WG0_W, dtype=float),
+        )
+        R_box0 = R_box[0]          
+        R_B0B = R_box @ R_box0.T  
 
-    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
-        p_box = self.data["position"]            # (T,3) 
-        v_box = self.data["linear_velocity"]     # (T,3)
-        R_box = self.data["rotation_matrices"]   # (T,3,3)
-        w_box = self.data["angular_velocity"]    # (T,3)
+        robot.offset = (
+            np.array([-0.055, 0.0, 0.0])
+            if robot.robot_id == 0
+            else np.array([0.055, 0.0, 0.0])
+        )
+        robot.lever = robot._r_B + robot.offset
+
+        delta_p_rot_B = (R_B0B - np.eye(3)) @ robot.lever 
+        delta_p_rot_W = (robot._R_WB0 @ delta_p_rot_B.T).T 
+
+        R_r2w = robot.T_r2w[:3, :3]
+        R_w2r = R_r2w.T
+        delta_p_rot_base = (R_w2r @ delta_p_rot_W.T).T
+
+        return delta_p_rot_base
+
+
+    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R, grasping_R_L_W, grasping_R_R_W):
+        data  = np.load(self._npz_path)
+        p_box = data["position"]            # (T,3) displacement of box center from t=0
+        v_box = data["linear_velocity"]     # (T,3)
+        R_box = data["rotation_matrices"]   # (T,3,3) absolute; R_box[0] is initial
+        w_box = data["angular_velocity"]    # (T,3)
+        self.traj_len = int(p_box.shape[0])
 
         # LEFT init
         p0_L, R0_L = grasping_point_L, grasping_R_L
         self.p_ref_L, self.v_ref_L = np.zeros_like(p_box), np.zeros_like(v_box)
         self.R_ref_L, self.w_ref_L = np.zeros_like(R_box), np.zeros_like(w_box)
 
-        # RIGHT init
+        # Right
         p0_R, R0_R = grasping_point_R, grasping_R_R
         self.p_ref_R, self.v_ref_R = np.zeros_like(p_box), np.zeros_like(v_box)
         self.R_ref_R, self.w_ref_R = np.zeros_like(R_box), np.zeros_like(w_box)
-        
-        R_box0 = R_box[0]
+
+        R_box0 = R_box[0]  # world <- B0
+
+        delta_base_L = self._compute_rotational_offset_from_traj(
+            self.robot_L,
+            R_box,
+            self.grasping_point_L_world,
+            self.grasping_point_R_world,
+            grasping_R_L_W                
+        )
+        delta_base_R = self._compute_rotational_offset_from_traj(
+            self.robot_R,
+            R_box,
+            self.grasping_point_R_world,
+            self.grasping_point_L_world,
+            grasping_R_R_W
+        )
+
         for t in range(self.traj_len):
+
+            # Left (translation)
             self.p_ref_L[t] = p0_L + p_box[t]
             self.v_ref_L[t] = v_box[t]
-            self.R_ref_L[t] = (R_box[t] @ R_box0.T) @ R0_L
+            R_rel = R_box[t] @ R_box0.T
+            self.R_ref_L[t] = R_rel @ R0_L
             self.w_ref_L[t] = w_box[t]
 
+            # Right (mirrored)
             self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
             self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
-            self.R_ref_R[t] = (R_box[t] @ R_box0.T) @ R0_R
-            self.w_ref_R[t] = w_box[t] 
+            self.R_ref_R[t] = R_rel @ R0_R
+            self.w_ref_R[t] = w_box[t]
+
+            self.p_ref_L[t] += delta_base_L[t]
+            self.p_ref_R[t] += delta_base_R[t]
 
     def build_qp(self, dt):
         n = 6
@@ -285,21 +337,20 @@ class DualArmImpedanceAdmittanceQP:
         t_idx = 0
         traj_initialized = False
 
-        # Init grasp data/normals
-        # TODO: should be right before go to approach
-
         # Reset admittance states
         self.x_n_L = 0.0; self.v_n_L = 0.0
         self.x_n_R = 0.0; self.v_n_R = 0.0
 
-        start_p_L = self.robotL.get_state()["gripper_base"][:3]
-        start_p_R = self.robotR.get_state()["gripper_base"][:3]
-        grasping_R_L = RR.from_rotvec(self.robotL.get_state()["pose"][3:6]).as_matrix()
-        grasping_R_R = RR.from_rotvec(self.robotR.get_state()["pose"][3:6]).as_matrix()
+        start_p_L = self.robot_L.get_state()["gripper_base"][:3]
+        start_p_R = self.robot_R.get_state()["gripper_base"][:3]
+        grasping_R_L = RR.from_rotvec(self.robot_L.get_state()["pose"][3:6]).as_matrix()
+        grasping_R_R = RR.from_rotvec(self.robot_R.get_state()["pose"][3:6]).as_matrix()
+        grasping_R_L_W = RR.from_rotvec(self.robot_L.get_state()["pose_world"][3:6]).as_matrix()
+        grasping_R_R_W = RR.from_rotvec(self.robot_R.get_state()["pose_world"][3:6]).as_matrix()
 
         try:
-            self.robotL.rtde_control.zeroFtSensor()
-            self.robotR.rtde_control.zeroFtSensor()
+            self.robot_L.rtde_control.zeroFtSensor()
+            self.robot_R.rtde_control.zeroFtSensor()
         except Exception:
             pass
 
@@ -314,25 +365,29 @@ class DualArmImpedanceAdmittanceQP:
                     print("Trajectory completed.")
                     break
 
-                state_L = self.robotL.get_state()
+                state_L = self.robot_L.get_state()
                 p_L, v_L = np.array(state_L["gripper_base"][:3]), np.array(state_L["speed"][:3])
                 R_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
+                R_rel_L = R_L @ grasping_R_L.T 
                 w_L = np.array(state_L["speed"][3:6])
-                q_L, qdot_L = self.robotL.get_q(), self.robotL.get_qdot()
-                n_L = self.normal_L_base
+                q_L, qdot_L = self.robot_L.get_q(), self.robot_L.get_qdot()
+                n_L = R_rel_L @ self.normal_L_base
+                n_L = n_L / (np.linalg.norm(n_L) + 1e-9)
                 F_L = np.array(state_L["filtered_force"][:3])
-                J_L = self.robotL.get_J(q_L)
-                J_dot_L = self.robotL.get_Jdot(q_L, qdot_L)
+                J_L = self.robot_L.get_J(q_L)
+                J_dot_L = self.robot_L.get_Jdot(q_L, qdot_L)
 
-                state_R = self.robotR.get_state()
+                state_R = self.robot_R.get_state()
                 p_R, v_R = np.array(state_R["gripper_base"][:3]), np.array(state_R["speed"][:3])
                 R_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
+                R_rel_R = R_R @ grasping_R_R.T
                 w_R = np.array(state_R["speed"][3:6])
-                q_R, qdot_R = self.robotR.get_q(), self.robotR.get_qdot()
-                n_R = self.normal_R_base
+                q_R, qdot_R = self.robot_R.get_q(), self.robot_R.get_qdot()
+                n_R = R_rel_R @ self.normal_R_base
+                n_R = n_R / (np.linalg.norm(n_R) + 1e-9)
                 F_R = np.array(state_R["filtered_force"][:3])
-                J_R = self.robotR.get_J(q_R)
-                J_dot_R = self.robotR.get_Jdot(q_R, qdot_R)
+                J_R = self.robot_R.get_J(q_R)
+                J_dot_R = self.robot_R.get_Jdot(q_R, qdot_R)
 
                 # ==================================
                 # 1) IMPEDANCE: trajectory tracking 
@@ -350,7 +405,8 @@ class DualArmImpedanceAdmittanceQP:
                     v_ref_R, w_ref_R = np.zeros(3), np.zeros(3)
                 else:
                     if not traj_initialized:
-                        self._load_refs(self.grasping_point_L_base, self.grasping_point_R_base, grasping_R_L, grasping_R_R)
+                        self._load_refs(self.grasping_point_L_base, self.grasping_point_R_base, grasping_R_L, grasping_R_R, grasping_R_L_W, grasping_R_R_W)
+                        time.sleep(0.1)
                         traj_initialized = True
                         t_idx = 0
                     
@@ -361,20 +417,20 @@ class DualArmImpedanceAdmittanceQP:
                         R_ref_R, w_ref_R = self.R_ref_R[t_idx], self.w_ref_R[t_idx]
                         t_idx += 1
                 
-                M_L = self.robotL.get_M(q_L)
-                Lam_L, Lam_inv_L = self.robotL.get_Lambda_and_inv(J_L, M_L)
-                D_L = self.robotL.get_D(self.robotL.K, Lam_L)
+                M_L = self.robot_L.get_M(q_L)
+                Lam_L, Lam_inv_L = self.robot_L.get_Lambda_and_inv(J_L, M_L)
+                D_L = self.robot_L.get_D(self.robot_L.K, Lam_L)
                 e_p_L, e_v_L = p_ref_L - p_L, v_ref_L - v_L
                 e_r_L, e_w_L = short_arc_log(R_ref_L, R_L), w_ref_L - w_L
-                f_des_L = self.robotL.wrench_desired(self.robotL.K, D_L, e_p_L, e_r_L, e_v_L, e_w_L)
+                f_des_L = self.robot_L.wrench_desired(self.robot_L.K, D_L, e_p_L, e_r_L, e_v_L, e_w_L)
                 a_des_L = Lam_inv_L @ f_des_L
 
-                M_R = self.robotR.get_M(q_R)
-                Lam_R, Lam_inv_R = self.robotR.get_Lambda_and_inv(J_R, M_R)
-                D_R = self.robotR.get_D(self.robotR.K, Lam_R)
+                M_R = self.robot_R.get_M(q_R)
+                Lam_R, Lam_inv_R = self.robot_R.get_Lambda_and_inv(J_R, M_R)
+                D_R = self.robot_R.get_D(self.robot_R.K, Lam_R)
                 e_p_R, e_v_R = p_ref_R - p_R, v_ref_R - v_R
                 e_r_R, e_w_R = short_arc_log(R_ref_R, R_R), w_ref_R - w_R
-                f_des_R = self.robotR.wrench_desired(self.robotR.K, D_R, e_p_R, e_r_R, e_v_R, e_w_R)
+                f_des_R = self.robot_R.wrench_desired(self.robot_R.K, D_R, e_p_R, e_r_R, e_v_R, e_w_R)
                 a_des_R = Lam_inv_R @ f_des_R
 
                 # ========================
@@ -445,8 +501,8 @@ class DualArmImpedanceAdmittanceQP:
                     qdot_L_cmd = qdot_L 
                     qdot_R_cmd = qdot_R
 
-                self.robotL.speedJ(qdot_L_cmd.tolist(), dt)
-                self.robotR.speedJ(qdot_R_cmd.tolist(), dt)
+                self.robot_L.speedJ(qdot_L_cmd.tolist(), dt)
+                self.robot_R.speedJ(qdot_R_cmd.tolist(), dt)
 
                 e_imp_L_val = J_L @ qddot_L_cmd + J_dot_L @ qdot_L - a_des_L
                 imp_L_term = float((self.W_imp_L @ e_imp_L_val).T @ (self.W_imp_L @ e_imp_L_val))
@@ -559,8 +615,8 @@ class DualArmImpedanceAdmittanceQP:
                 traceback.print_exc()
                 break
 
-        self.robotL.speedStop()
-        self.robotR.speedStop()
+        self.robot_L.speedStop()
+        self.robot_R.speedStop()
         total_time = time.perf_counter() - self._ctrl_start_wall
         print(f"[GRASP DUAL a-OPT SUMMARY] Ran {self._total_iters} iters @ "
               f"{self._total_iters/total_time:.1f} Hz")
@@ -975,7 +1031,7 @@ if __name__ == "__main__":
     v_max = 0.05
     Fn_ref = 25.0
 
-    traj_path = "motion_planner/trajectories_old/pick_and_place.npz"
+    traj_path = "motion_planner/trajectories_old/twist.npz"
     Hz = 50
 
     ctrl = DualArmImpedanceAdmittanceQP(
