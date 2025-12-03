@@ -422,7 +422,10 @@ class URForceController(URController):
                     else:
                         offset = [0.055, 0, 0]
 
-                    delta_p_rot_B = (R_B0B - np.eye(3)) @ (self._r_B + offset)
+                    r_B_plus_offset = self._r_B + offset
+
+
+                    delta_p_rot_B = (R_B0B - np.eye(3)) @ r_B_plus_offset
                     delta_p_rot_W = self._R_WB0 @ delta_p_rot_B
                     self.reference_position = (
                         self.grasping_point + position_offset + delta_p_rot_W

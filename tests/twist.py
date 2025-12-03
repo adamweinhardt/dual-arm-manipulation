@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     alpha = 0.85
     deadzone_threshold = None
-    trajectory = "motion_planner/trajectories_old/twist_y.npz"
+    trajectory = "motion_planner/trajectories_old/twist.npz"
 
     robotL = URForceController(
         "192.168.1.33",
