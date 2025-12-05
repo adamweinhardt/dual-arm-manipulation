@@ -9,25 +9,27 @@ if __name__ == "__main__":
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.025 * factor
-    ki_f = 0.0000 * factor
-    kd_f = 0.005 * factor
+    kp_f = 0.0065 * factor
+    ki_f = 0.0001 * factor
+    kd_f = 0.001 * factor
 
-    kp_p = 1.1  # 0.5
+    kp_p = 1.2  # 0.5
     ki_p = 0.00005
-    kd_p = 0.08  # 0.0025
+    kd_p = 0.34  # 0.0025
 
-    kp_r = 0
+    kp_r = 1.35
     ki_r = 0
-    kd_r = 0
-
-    Kp_p = 0.4
-    Ki_p = 0
-    Kd_p = 0.05
+    kd_r = 0.1
 
     alpha = 0.85
     deadzone_threshold = 0.02
-    trajectory = "motion_planner/trajectories_old/rectangular_fast.npz"
+
+    date = time.strftime("%Y%m%d-%H%M%S")
+    version = "PID_dz" # PID, PID_dz, PID_ff, QP
+    box = "vention" # migros, vention
+    traj = "pick_and_place_0.5v_0.25a_0.5w_0.25B"
+    weigth = "0.2kg"
+    trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -41,9 +43,6 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
-        Kp_p=Kp_p,
-        Ki_p=Ki_p,
-        Kd_p=Kd_p,
     )
     robotR = URForceController(
         "192.168.1.66",
@@ -57,15 +56,24 @@ if __name__ == "__main__":
         kp_r=kp_r,
         ki_r=ki_r,
         kd_r=kd_r,
-        Kp_p=Kp_p,
-        Ki_p=Ki_p,
-        Kd_p=Kd_p,
     )
 
     robotL.alpha = alpha
     robotR.alpha = alpha
 
     try:
+        robotL.moveJ(
+            [
+                -0.9861305395709437,
+                -1.0489304226687928,
+                2.1829379240619105,
+                -2.6813165150084437,
+                -1.598926846181051,
+                3.818711757659912,
+            ]
+        )
+
+        robotL.wait_for_commands()
         robotL.moveJ(
             [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
         )
@@ -99,7 +107,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=25,
+            timeout=60,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -107,7 +115,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=25,
+            timeout=60,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -115,8 +123,8 @@ if __name__ == "__main__":
         robotR.wait_for_control()
         robotL.wait_for_control()
 
-        robotR.plot_data3D()
-        robotL.plot_data3D()
+        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_R_{date}_weigth")
+        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_L_{date}_weigth")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

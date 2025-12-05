@@ -5,27 +5,14 @@ from scipy.spatial.transform import Rotation
 if __name__ == "__main__":
     planner = MotionPlanner()
 
-    # --- Configuration ---
-    LIFT_HEIGHT = 0.20  # 20 cm Z-lift
-    PLACE_Y_OFFSET = -0.50 # 50 cm move in -Y direction
-    MAX_VEL = 0.25 # m/s
-    MAX_ACC = 0.5  # m/s^2
-    HOLD_DUR = 0.5 # seconds to pause
-    hz = 100
-    dt = 1 / hz
+import numpy as np
+import os
 
-    # --- Helper function for Pose Creation ---
-    def make_pose_from_p_R(position: np.ndarray, rotation: np.ndarray) -> np.ndarray:
-        """Helper to create a 4x4 homogenous pose from position and 3x3 rotation matrix."""
-        T = np.eye(4)
-        T[:3, :3] = rotation
-        T[:3, 3] = position
-        return T
+if __name__ == "__main__":
+    planner = MotionPlanner()
 
-    # --- Define Key Poses (All with Identity Rotation) ---
-
-    # 1. Start/Pick Pose (0, 0, 0)
-    pose_pick_start = np.array(
+    # Base → lift-up (same as your original)
+    pose1 = np.array(
         [
             [1, 0, 0, 0],
             [0, 1, 0, 0],
@@ -33,78 +20,71 @@ if __name__ == "__main__":
             [0, 0, 0, 1],
         ]
     )
-    R_base = pose_pick_start[:3, :3]
-
-    # 2. Lifted Pose (0, 0, 0.2)
-    pose_lifted_pick = make_pose_from_p_R(
-        np.array([0.0, 0.0, LIFT_HEIGHT]), R_base
+    pose2 = np.array(
+        [
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0.2],   # lift 0.2 m
+            [0, 0, 0, 1],
+        ]
     )
 
-    # 3. Lifted Place Pose (0, -0.5, 0.2)
-    pose_lifted_place = make_pose_from_p_R(
-        np.array([0.0, PLACE_Y_OFFSET, LIFT_HEIGHT]), R_base
+    # --- Add 30° rotation about z for the transport & place ---
+    theta = np.deg2rad(45.0)
+    c, s = np.cos(theta), np.sin(theta)
+    pose3 = np.array(
+        [
+            [ c, -s, 0, -1],
+            [ s,  c, 0, 0],
+            [ 0,  0, 1, 0.2],
+            [ 0,  0, 0, 1],
+        ]
     )
-    
-    # 4. Final Place Pose (0, -0.5, 0.0)
-    pose_place_end = make_pose_from_p_R(
-        np.array([0.0, PLACE_Y_OFFSET, 0.0]), R_base
+
+    # Transport target (x = -1 m, z = 0.2 m) with final 30° yaw
+    pose4= np.array(
+        [
+            [ c, -s, 0, -1],
+            [ s,  c, 0, 0],
+            [ 0,  0, 1, 0],
+            [ 0,  0, 0, 1],
+        ]
     )
 
-    # --- Sequence Generation ---
-    trajectory_segments = []
-    current_pose = pose_pick_start.copy()
+    # ---- Timing & segments (tuned like your original) ----
+    hz = 100
+    dt = 1 / hz
 
-    # 1. Lift Up (Pick Approach)
-    seg_lift_up = planner.linear(
-        start_pose=current_pose,
-        end_pose=pose_lifted_pick,
-        dt=dt,
-        max_velocity=MAX_VEL,
-        max_acceleration=MAX_ACC
+    max_lin_vel = 0.5  # m/s
+    max_lin_acc = 0.25  # m/s²
+    max_ang_vel = 0.5 #rad/s
+    max_ang_acc = 0.25 #rad/s²
+
+
+    up = planner.linear(pose1, pose2, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc)
+    transport_with_yaw = planner.linear(
+        pose2, pose3, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc
     )
-    trajectory_segments.append(seg_lift_up)
-    current_pose = pose_lifted_pick.copy()
-    trajectory_segments.append(planner.hold(current_pose, duration=HOLD_DUR, dt=dt)) # Pause to simulate grasping
-
-
-    # 2. Move to Place Location (-Y 50 cm)
-    seg_move_place = planner.linear(
-        start_pose=current_pose,
-        end_pose=pose_lifted_place,
-        dt=dt,
-        max_velocity=MAX_VEL,
-        max_acceleration=MAX_ACC
+    place_down_with_yaw = planner.linear(
+        pose3, pose4, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc
     )
-    trajectory_segments.append(seg_move_place)
-    current_pose = pose_lifted_place.copy()
-    trajectory_segments.append(planner.hold(current_pose, duration=HOLD_DUR, dt=dt)) # Pause to simulate releasing
 
-
-    # 3. Put Down (Place Descent)
-    seg_put_down = planner.linear(
-        start_pose=current_pose,
-        end_pose=pose_place_end,
-        dt=dt,
-        max_velocity=MAX_VEL,
-        max_acceleration=MAX_ACC
+    full_trajectory = planner.concatenate_trajectories(
+        [up, transport_with_yaw, place_down_with_yaw]
     )
-    trajectory_segments.append(seg_put_down)
-    current_pose = pose_place_end.copy()
 
-
-    # --- Concatenate Trajectories ---
-    pick_and_place_trajectory = planner.concatenate_trajectories(trajectory_segments)
-
-    # --- Save and Plot ---
-    import os
+    # Ensure directory exists BEFORE saving figures/files
     os.makedirs("plots", exist_ok=True)
     os.makedirs("motion_planner/trajectories", exist_ok=True)
 
-    fig3d, _ = pick_and_place_trajectory.plot_3d(show_frames=False)
-    fig3d.savefig("plots/trajectory_pick_and_place_3d.png", dpi=150, bbox_inches="tight")
-    
+    # Plots
+    fig3d, _ = full_trajectory.plot_3d()
+    fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
 
-    fig_profiles = pick_and_place_trajectory.plot_profiles()
-    fig_profiles.savefig("plots/trajectory_pick_and_place_profiles.png", dpi=150, bbox_inches="tight")
-    
-    pick_and_place_trajectory.save_trajectory("motion_planner/trajectories/pick_and_place.npz")
+    fig_profiles = full_trajectory.plot_profiles()
+    fig_profiles.savefig("plots/trajectory_profiles.png", dpi=150, bbox_inches="tight")
+
+    # Save trajectory bundle
+    full_trajectory.save_trajectory(
+        f"motion_planner/trajectories/pick_and_place_{max_lin_vel}v_{max_lin_acc}a_{max_ang_vel}w_{max_ang_acc}B.npz"
+    )

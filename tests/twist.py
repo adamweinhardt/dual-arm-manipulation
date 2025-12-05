@@ -17,9 +17,9 @@ if __name__ == "__main__":
     ki_p = 0.00005
     kd_p = 0.25  # 0.0025
 
-    kp_r = 1.8
+    kp_r = 1.1
     ki_r = 0
-    kd_r = 0.2
+    kd_r = 0.3
 
     kp_t=0.01,
     ki_t=0, 
@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     alpha = 0.85
     deadzone_threshold = None
-    trajectory = "motion_planner/trajectories_old/twist.npz"
+    trajectory = "motion_planner/trajectories_old/twist_y.npz"
 
     robotL = URForceController(
         "192.168.1.33",

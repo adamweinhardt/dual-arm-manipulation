@@ -15,6 +15,7 @@ from utils.utils import (
     end_effector_rotation_from_normal,
     _assert_rotmat,
 )
+from control.PID.pid_controller import flip_y_component_in_rotations, flip_x_component_in_rotations
 
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
@@ -115,7 +116,7 @@ class URForceController(URController):
         self.grasping_socket.connect(f"tcp://127.0.0.1:{grasping_port}")
 
         self.current_grasping_data = {}
-        self.box_dimension = None
+        self.box_data = []
 
     def _update_grasping_data(self):
         """Update grasping data from ZMQ (non-blocking)"""
@@ -159,6 +160,25 @@ class URForceController(URController):
             np.array(normal_vector),
         )
     
+    def get_box_data(self):
+        while not self._update_grasping_data():
+            time.sleep(0.01)
+
+        box_id = list(self.current_grasping_data.keys())[0]
+        g = self.current_grasping_data[box_id]
+
+        box_position = g.get("box_position")
+        box_rotation_matrix = g.get("box_rotation_matrix")
+
+
+        if box_position is None or box_rotation_matrix is None:
+            return None, None
+
+        return (
+            np.array(box_position),
+            np.array(box_rotation_matrix)
+        )
+    
     def get_grasping_data_both(self):
         while not self._update_grasping_data():
             time.sleep(0.01)
@@ -184,16 +204,6 @@ class URForceController(URController):
         )
 
     
-    def box_dimensions(self):
-        """Get approach point for this robot from latest grasping data"""
-        while not self._update_grasping_data():
-            time.sleep(0.01)
-
-        box_id = list(self.current_grasping_data.keys())[0]
-        g = self.current_grasping_data[box_id]
-
-        return g.get("box_x_dim"), g.get("box_y_dim"), g.get("box_z_dim")
-
     def go_to_approach(self):
         """Go to approach point for grasping - simplified using moveL_world"""
         _, approach_point, normal = self.get_grasping_data()
@@ -250,8 +260,11 @@ class URForceController(URController):
         self._r_B = self._R_WB0.T @ (grasping_point - self._p_WB0)
 
     def _compute_reference_rotation(self, R_B0B):
+
         R_WB = self._R_WB0 @ R_B0B
-        return R_WB @ self._R_BG
+        R_ref = R_WB @ self._R_BG
+
+        return R_ref
     
 
     def control_to_target(
@@ -293,6 +306,12 @@ class URForceController(URController):
             traj_npz = np.load(trajectory)
             self.rot_updates = traj_npz["rotation_matrices"]
             self.pose_updates_stream = traj_npz.get("position", None)
+            if self.robot_id == 0:
+                print("Flipped for robot 0")
+                self.rot_updates = flip_y_component_in_rotations(self.rot_updates)
+                self.rot_updates = flip_x_component_in_rotations(self.rot_updates)
+            self.traj_linear_velocity = traj_npz.get("linear_velocity", None)
+            self.traj_angular_velocity = traj_npz.get("angular_velocity", None)
             self._traj_len = len(self.rot_updates)
 
             if (
@@ -309,7 +328,10 @@ class URForceController(URController):
         else:
             self.rot_updates = None
             self.pose_updates_stream = None
+            self.reference_linear_velocity = None
+            self.reference_angular_velocity = None
             self._traj_len = 0
+
 
         # Reset PIDs & logs
         self.force_pid.reset()
@@ -329,11 +351,14 @@ class URForceController(URController):
 
         trajectory_started = False
         trajectory_index = 0
-        self.box_dimension = self.get_box_dimension()
 
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
             try:
+                if trajectory_index >= self._traj_len:
+                    print("Trajectory completed.")
+                    break
+                self.box_data.append(self.get_box_data())
                 if not trajectory_started:
                         reference_force = 50 # 150
                         base_force = 12.5
@@ -403,6 +428,7 @@ class URForceController(URController):
                     self.reference_rotation_matrix = _assert_rotmat(
                         "my ref_R (traj)", R_WG_ref
                     )
+
                     self.reference_rotation = R.from_matrix(
                         self.reference_rotation_matrix
                     ).as_rotvec()
@@ -416,6 +442,19 @@ class URForceController(URController):
                         R_WB @ self._rhat_B
                     )  # points out of the box face
                     self.control_direction = -outward_normal_world
+
+                    if getattr(self, "traj_linear_velocity", None) is not None:
+                        if trajectory_index < len(self.traj_linear_velocity):
+                            self.reference_linear_velocity = np.array(
+                                self.traj_linear_velocity[trajectory_index], dtype=float
+                            )
+
+                    if getattr(self, "traj_angular_velocity", None) is not None:
+                        if trajectory_index < len(self.traj_angular_velocity):
+                            self.reference_angular_velocity = np.array(
+                                self.traj_angular_velocity[trajectory_index], dtype=float
+                            )
+
 
                     trajectory_index += 1
 
@@ -554,85 +593,6 @@ class URForceController(URController):
         """Override disconnect to stop force control first"""
         self.stop_control()
         super().disconnect
-
-    def save_run_data(self, directory="runs"):
-        if not self.control_data:
-            print("No control data to save.")
-            return
-
-        # 1. Create directory and filename
-        os.makedirs(directory, exist_ok=True)
-        current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        robot_id = getattr(self, "robot_id", "x")
-        filename = os.path.join(
-            directory, f"control_run_{current_datetime}_R{robot_id}.npz"
-        )
-
-        # 2. Extract metadata and run parameters
-        # Safely extract PID gains, accounting for VectorPIDController structure
-        def get_pid_gains(pid_controller):
-            if pid_controller is None:
-                return 0, 0, 0
-            # Ensure 3 elements for vector PID, even if initialized with scalar
-            kp = pid_controller.kp if pid_controller.kp.size == 3 else np.repeat(pid_controller.kp.item(), 3)
-            ki = pid_controller.ki if pid_controller.ki.size == 3 else np.repeat(pid_controller.ki.item(), 3)
-            kd = pid_controller.kd if pid_controller.kd.size == 3 else np.repeat(pid_controller.kd.item(), 3)
-            return kp, ki, kd
-
-        kp_f, ki_f, kd_f = get_pid_gains(self.force_pid)
-        kp_p, ki_p, kd_p = get_pid_gains(self.pose_pid)
-        kp_r, ki_r, kd_r = get_pid_gains(self.rot_pid)
-        Kp_p, Ki_p, Kd_p = get_pid_gains(self.ff_pose_pid)
-        
-        metadata = {
-            "timestamp_start": self.start_time,
-            "control_rate_hz": self.control_rate_hz,
-            "robot_id": robot_id,
-            "reference_force": self.ref_force,
-            "distance_cap": self.distance_cap,
-            "control_timeout": self.control_timeout,
-            "deadzone_threshold": self.deadzone_threshold,
-            
-            # PID gains (Force)
-            "kp_f": kp_f, "ki_f": ki_f, "kd_f": kd_f,
-            # PID gains (Pose)
-            "kp_p": kp_p, "ki_p": ki_p, "kd_p": kd_p,
-            # PID gains (Rotation)
-            "kp_r": kp_r, "ki_r": ki_r, "kd_r": kd_r,
-            # PID gains (Feed-Forward Pose)
-            "Kp_p": Kp_p, "Ki_p": Ki_p, "Kd_p": Kd_p,
-            
-            # Initial state and references
-            "start_position": self.start_position,
-            "start_rotation": self.start_rotation,
-            "grasping_point": self.grasping_point,
-            "control_direction": self.control_direction,
-            "trajectory_available": self.rot_updates is not None,
-        }
-
-        # 3. Structure time-series data
-        data_to_save = {}
-        if self.control_data:
-            data_keys = self.control_data[0].keys()
-            for key in data_keys:
-                try:
-                    # Stack all values for a given key across all time steps
-                    # This works for vectors (3D arrays) and scalars
-                    data_array = np.stack([d[key] for d in self.control_data])
-                    data_to_save[key] = data_array
-                except ValueError:
-                    # If stacking failed (e.g., mixing array sizes or non-stackable types)
-                    # Try converting to a simple flat array
-                    data_to_save[key] = np.array([d[key] for d in self.control_data])
-                except KeyError:
-                    print(f"Key {key} missing in some log entries.")
-
-        # 4. Combine metadata and time-series data for saving
-        save_dict = {**metadata, **data_to_save}
-
-        # 5. Save the data
-        np.savez_compressed(filename, **save_dict)
-        print(f"Control run data saved successfully to: {filename}")
 
     def plot_PID(self):
         if not self.control_data:
@@ -1425,3 +1385,215 @@ class URForceController(URController):
         os.makedirs("plots", exist_ok=True)
         plt.savefig(filename, dpi=150, bbox_inches="tight")
         plt.close()
+
+    def save_everything(self, out_path=None):
+        """
+        ONE-SHOT DUMP OF THE ENTIRE RUN TO A SINGLE .NPZ
+
+        Contents include:
+        - Time series from self.control_data (timestamps, forces, poses, refs, errors, PID outputs/terms, totals...)
+        - Box pose-estimation measurements from self.box_data
+        - Reference signals (position, rotation, velocity, angular velocity, force)
+        - Frame info (R_WB0, p_WB0, R_BG, r_B) when available
+        - Controller configuration (PID gains, rate, caps, thresholds)
+        - Start pose, grasp points, trajectory metadata
+        - Any plot images saved during the run
+        """
+        import numpy as np, os, datetime
+
+        # ---------- filename ----------
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        os.makedirs("logs", exist_ok=True)
+        if out_path is None:
+            robot_id = getattr(self, "robot_id", "x")
+            out_path = os.path.join("logs", f"run_{ts}_r{robot_id}.npz")
+
+        # ---------- control_data stacker ----------
+        cd = self.control_data if hasattr(self, "control_data") and self.control_data else []
+        stacked = {}
+        if cd:
+            common_keys = set(cd[0].keys())
+            for d in cd[1:]:
+                common_keys &= set(d.keys())
+
+            priority = [
+                "timestamp",
+                "force_vector","position","rotation",
+                "reference_force_vector","reference_position","reference_rotation",
+                "force_error_vector","position_error_vector","rotation_error_vector",
+                "force_output_vector","position_output_vector","ff_position_output_vector",
+                "total_output_vector","rotation_output_vector",
+                "force_p_term","force_i_term","force_d_term",
+                "pos_p_term","pos_i_term","pos_d_term",
+                "ff_pos_p_term","ff_pos_i_term","ff_pos_d_term",
+                "rot_p_term","rot_i_term","rot_d_term",
+            ]
+
+            ordered_keys = [k for k in priority if k in common_keys] + \
+                        [k for k in sorted(common_keys) if k not in priority]
+
+            for k in ordered_keys:
+                try:
+                    arr = np.array([d[k] for d in cd])
+                    if k != "timestamp" and arr.ndim == 1:
+                        arr = np.expand_dims(arr, -1)
+                    stacked[f"{k}"] = arr
+                except Exception:
+                    pass
+
+        # ---------- box pose-estimation data ----------
+        box_positions, box_rotmats = [], []
+        if hasattr(self, "box_data") and self.box_data:
+            for tpl in self.box_data:
+                if tpl is None or len(tpl) < 2 or tpl[0] is None or tpl[1] is None:
+                    box_positions.append(np.array([np.nan, np.nan, np.nan]))
+                    box_rotmats.append(np.full((3,3), np.nan))
+                else:
+                    bp, br = tpl
+                    box_positions.append(np.array(bp).reshape(3,))
+                    br_arr = np.array(br).reshape(3,3) if np.array(br).size == 9 else np.full((3,3), np.nan)
+                    box_rotmats.append(br_arr)
+
+        box_positions = np.vstack(box_positions) if box_positions else np.zeros((0,3))
+        box_rotmats = np.stack(box_rotmats) if box_rotmats else np.zeros((0,3,3))
+
+        # ---------- frame and reference info ----------
+        R_WB0 = getattr(self, "_R_WB0", None)
+        p_WB0 = getattr(self, "_p_WB0", None)
+        R_BG  = getattr(self, "_R_BG",  None)
+        r_B   = getattr(self, "_r_B",   None)
+
+        ref_pos    = getattr(self, "reference_position", None)
+        ref_rot    = getattr(self, "reference_rotation", None)
+        ref_Rmat   = getattr(self, "reference_rotation_matrix", None)
+        ref_force  = getattr(self, "ref_force", None)
+        ctrl_dir   = getattr(self, "control_direction", None)
+
+        ref_vel    = getattr(self, "reference_linear_velocity", None)
+        ref_omega  = getattr(self, "reference_angular_velocity", None)
+
+        # ---------- controller metadata ----------
+        meta = {}
+
+        for label, obj in [
+            ("force_pid", getattr(self, "force_pid", None)),
+            ("pose_pid", getattr(self, "pose_pid", None)),
+            ("rot_pid", getattr(self, "rot_pid", None)),
+            ("ff_pose_pid", getattr(self, "ff_pose_pid", None))]:
+            if obj is not None:
+                try:
+                    meta[f"{label}_kp"] = np.array(obj.kp)
+                    meta[f"{label}_ki"] = np.array(obj.ki)
+                    meta[f"{label}_kd"] = np.array(obj.kd)
+                except Exception:
+                    pass
+
+        for n in ["kp_f","ki_f","kd_f"]:
+            if hasattr(self, n):
+                meta[n] = float(getattr(self, n))
+
+        Hz_val = float(getattr(self, "control_rate_hz", 0.0))
+        meta["control_rate_hz"] = Hz_val
+        meta["Hz"] = Hz_val
+
+        meta["distance_cap"] = float(getattr(self, "distance_cap", np.nan)) \
+                            if hasattr(self, "distance_cap") else np.nan
+        meta["timeout_s"] = float(getattr(self, "control_timeout", np.nan)) \
+                            if hasattr(self, "control_timeout") else np.nan
+        meta["deadzone_threshold"] = float(getattr(self, "deadzone_threshold", np.nan)) \
+                                    if hasattr(self, "deadzone_threshold") else np.nan
+
+        meta["start_time_epoch"] = float(getattr(self, "start_time", np.nan))
+        meta["robot_id"] = getattr(self, "robot_id", -1)
+
+        for name in ["start_position","start_rotation","grasping_point","other_robot_grasp_point"]:
+            if hasattr(self, name) and getattr(self, name) is not None:
+                meta[name] = np.array(getattr(self, name), dtype=float)
+
+        # ---------- include plot paths ----------
+        plot_paths = []
+        try:
+            if os.path.isdir("plots"):
+                for fn in os.listdir("plots"):
+                    if fn.lower().endswith((".png",".jpg",".jpeg",".pdf")):
+                        plot_paths.append(os.path.join("plots", fn))
+        except Exception:
+            pass
+        plot_paths_arr = np.array(plot_paths, dtype=object)
+
+        # ---------- pack everything ----------
+        pack = {}
+        pack.update(stacked)
+        pack["box_positions"] = box_positions
+        pack["box_rotmats"]   = box_rotmats
+
+        if ref_pos is not None:  pack["ref_position_last"] = np.array(ref_pos)
+        if ref_rot is not None:  pack["ref_rotation_last"] = np.array(ref_rot)
+        if ref_Rmat is not None: pack["ref_rotation_matrix_last"] = np.array(ref_Rmat)
+
+        # ⭐ NEW: save velocities
+        if ref_vel is not None:   pack["ref_linear_velocity_last"] = np.array(ref_vel)
+        if ref_omega is not None: pack["ref_angular_velocity_last"] = np.array(ref_omega)
+
+        if ref_force is not None:
+            try: pack["ref_force"] = np.array(ref_force)
+            except: pack["ref_force"] = np.array([float(ref_force)])
+
+        if ctrl_dir is not None:
+            pack["control_direction"] = np.array(ctrl_dir)
+
+        # frames
+        if R_WB0 is not None: pack["frame_R_WB0"] = np.array(R_WB0)
+        if p_WB0 is not None: pack["frame_p_WB0"] = np.array(p_WB0)
+        if R_BG  is not None: pack["frame_R_BG"]  = np.array(R_BG)
+        if r_B   is not None: pack["frame_r_B"]   = np.array(r_B)
+
+        # meta fields
+        for k, v in meta.items():
+            pack[f"meta__{k}"] = v if isinstance(v, (float,int,np.floating)) else np.array(v)
+
+        pack["plot_paths"] = plot_paths_arr
+
+        # ---------- optional trajectory references ----------
+        if hasattr(self, "rot_updates") and self.rot_updates is not None:
+            try: pack["traj_rotation_matrices"] = np.array(self.rot_updates)
+            except: pass
+
+        if hasattr(self, "pose_updates_stream") and self.pose_updates_stream is not None:
+            try: pack["traj_position_offsets"] = np.array(self.pose_updates_stream)
+            except: pass
+
+        # ---------- derived box reference poses ----------
+        try:
+            if (hasattr(self, "_R_WB0") and self._R_WB0 is not None and
+                hasattr(self, "_p_WB0") and self._p_WB0 is not None and
+                hasattr(self, "rot_updates") and self.rot_updates is not None):
+
+                R_WB0 = np.array(self._R_WB0).reshape(3,3)
+                p_WB0 = np.array(self._p_WB0).reshape(3,)
+
+                rot_updates = np.array(self.rot_updates)
+                pos_off = None
+                if getattr(self, "pose_updates_stream", None) is not None:
+                    pos_off = np.array(self.pose_updates_stream)
+
+                K = len(rot_updates)
+                box_ref_rotmats = np.zeros((K,3,3))
+                box_ref_positions = np.zeros((K,3))
+
+                for i in range(K):
+                    R_B0B = rot_updates[i]
+                    R_WB = R_WB0 @ R_B0B
+                    box_ref_rotmats[i] = R_WB
+
+                    dp = pos_off[i] if (pos_off is not None and i < len(pos_off)) else np.zeros(3)
+                    box_ref_positions[i] = p_WB0 + (R_WB0 @ dp)
+
+                pack["box_ref_rotmats"] = box_ref_rotmats
+                pack["box_ref_positions"] = box_ref_positions
+        except Exception:
+            pass
+
+        np.savez_compressed(out_path, **pack)
+        print(f"[SAVED] {out_path}")
+        return out_path

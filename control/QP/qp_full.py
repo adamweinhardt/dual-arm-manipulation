@@ -364,6 +364,8 @@ class DualArmImpedanceAdmittanceQP:
                 if t_idx >= self.traj_len:
                     print("Trajectory completed.")
                     break
+                
+                self.robot_L.box_data.append(self.robot_L.get_box_data())
 
                 state_L = self.robot_L.get_state()
                 p_L, v_L = np.array(state_L["gripper_base"][:3]), np.array(state_L["speed"][:3])
@@ -1010,6 +1012,243 @@ class DualArmImpedanceAdmittanceQP:
 
         print(f"[plot_force_profile] Saved:\n  {f1}\n  {f2}")
 
+    def save_everything(self, out_path=None):
+        """
+        ONE-SHOT SAVE of the whole Dual-Arm Impedance/Admittance QP run into a single .npz
+
+        What goes in:
+          • Raw measurements (per arm): p, v, w, q, qdot, forces, etc.
+          • References / controller signals: p_ref, v_ref, w_ref, rvec_ref, xdot_star, admittance states (x_n, v_n, a_n)
+          • Errors: e_p, e_v, e_w, e_r (per arm)
+          • QP internals: solver times, objective breakdown components, status
+          • Planner trajectory: position, linear_velocity, rotation_matrices, angular_velocity (from self._npz_path)
+          • Box pose streams: robot_L.box_data, robot_R.box_data (if available)
+          • Meta/config: Hz, dt, limits, weights, K, admittance (M_a/D_a/K_a), v_max, ref_force, lambda_reg, totals
+          • Any plot images under ./plots (paths only)
+
+        Usage:
+          ctrl.save_everything()  # or ctrl.save_everything("logs/dual_arm_run_....npz")
+        """
+        import os, datetime
+        import numpy as np
+
+        # ---------- filename ----------
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        os.makedirs("logs", exist_ok=True)
+        if out_path is None:
+            out_path = os.path.join("logs", f"dual_arm_qp_run_{ts}.npz")
+
+        pack = {}
+
+        # ---------- control_data → flat stacked arrays ----------
+        cd = self.control_data if hasattr(self, "control_data") and self.control_data else []
+        if cd:
+            # basic timeline / qp metrics
+            def _stack(key, conv=None):
+                try:
+                    arr = np.array([d[key] for d in cd])
+                    return conv(arr) if conv else arr
+                except Exception:
+                    return np.array([])
+            pack["t_epoch"]      = _stack("t")
+            pack["i"]            = _stack("i")
+            pack["solver_time"]  = _stack("solver_time")
+            pack["model_time"]   = _stack("model_time")
+            # objective breakdown (if present)
+            if "obj_break" in cd[0]:
+                try:
+                    pack["obj_imp_L"] = np.array([d["obj_break"]["imp_L"] for d in cd], dtype=float)
+                    pack["obj_imp_R"] = np.array([d["obj_break"]["imp_R"] for d in cd], dtype=float)
+                    pack["obj_grasp_L"] = np.array([d["obj_break"]["grasp_L"] for d in cd], dtype=float)
+                    pack["obj_grasp_R"] = np.array([d["obj_break"]["grasp_R"] for d in cd], dtype=float)
+                    pack["obj_reg"]    = np.array([d["obj_break"]["reg"] for d in cd], dtype=float)
+                    pack["obj_total"]  = np.array([d["obj_break"]["total"] for d in cd], dtype=float)
+                except Exception:
+                    pass
+            # status (store as object array of strings)
+            try:
+                pack["status"] = np.array([str(d.get("status","")) for d in cd], dtype=object)
+            except Exception:
+                pass
+
+            # force/admittance scalars
+            for k in ["F_n_L","F_n_R","ref_force","x_n_L","x_n_R","v_n_L","v_n_R","a_n_L","a_n_R","d_L","d_R"]:
+                try:
+                    pack[f"{k}"] = np.array([d[k] for d in cd], dtype=float)
+                except Exception:
+                    pass
+
+            # per-arm joint & command states
+            for arm in ("L","R"):
+                for k in (f"q_{arm}", f"q_dot_{arm}", f"q_ddot_{arm}"):
+                    try:
+                        pack[f"{k}"] = np.array([d[k] for d in cd], dtype=float)
+                    except Exception:
+                        pass
+
+                # tcp dicts (measured vs refs vs errors)
+                tcp_key = f"tcp_{arm}"
+                if tcp_key in cd[0]:
+                    def _grab(tk):
+                        try:
+                            return np.array([d[tcp_key][tk] for d in cd], dtype=float)
+                        except Exception:
+                            return np.zeros((0,3))
+                    pack[f"p_{arm}"]        = _grab("p")
+                    pack[f"v_{arm}"]        = _grab("v")
+                    pack[f"w_{arm}"]        = _grab("w")
+                    pack[f"rvec_{arm}"]     = _grab("rvec")
+                    pack[f"p_ref_{arm}"]    = _grab("p_ref")
+                    pack[f"v_ref_{arm}"]    = _grab("v_ref")
+                    pack[f"w_ref_{arm}"]    = _grab("w_ref")
+                    pack[f"rvec_ref_{arm}"] = _grab("rvec_ref")
+                    pack[f"e_p_{arm}"]      = _grab("e_p")
+                    pack[f"e_v_{arm}"]      = _grab("e_v")
+                    pack[f"e_w_{arm}"]      = _grab("e_w")
+                    pack[f"e_r_{arm}"]      = _grab("e_r")
+
+                # commanded/desired twist & measured twist (already logged as arrays)
+                for tag in ("v_tcp","v_des"):
+                    key = f"{tag}_{arm}"
+                    try:
+                        pack[f"{key}"] = np.array([d[key] for d in cd], dtype=float)
+                    except Exception:
+                        pass
+
+            # per-iter base-frame poses used in force plots
+            for k in ("p_L","p_R","grasp_L","grasp_R"):
+                try:
+                    pack[f"{k}"] = np.array([d[k] for d in cd], dtype=float)
+                except Exception:
+                    pass
+
+            # full force vectors & refs (if present inside nested dict)
+            try:
+                pack["F_L_vec"] = np.array([d["force_data"]["F_L_vec"] for d in cd], dtype=float)
+                pack["F_R_vec"] = np.array([d["force_data"]["F_R_vec"] for d in cd], dtype=float)
+                pack["F_L_ref"] = np.array([d["force_data"]["F_L_ref"] for d in cd], dtype=float)
+                pack["F_R_ref"] = np.array([d["force_data"]["F_R_ref"] for d in cd], dtype=float)
+                pack["v_star_L"] = np.array([d["force_data"]["v_star_L"] for d in cd], dtype=float)
+                pack["v_star_R"] = np.array([d["force_data"]["v_star_R"] for d in cd], dtype=float)
+            except Exception:
+                pass
+
+        # ---------- planner trajectory (what you loaded) ----------
+        try:
+            traj_npz = self.data  # already loaded in __init__
+            for key in ("position","linear_velocity","rotation_matrices","angular_velocity"):
+                if key in traj_npz:
+                    pack[f"traj__{key}"] = np.array(traj_npz[key])
+        except Exception:
+            pass
+
+        # ---------- precomputed per-arm reference sequences (if _load_refs ran) ----------
+        for arm in ("L","R"):
+            for name in (f"p_ref_{arm}", f"v_ref_{arm}", f"R_ref_{arm}", f"w_ref_{arm}"):
+                if hasattr(self, name):
+                    try:
+                        pack[f"refs__{name}"] = np.array(getattr(self, name))
+                    except Exception:
+                        pass
+
+        # ---------- box pose streams (from pose estimation) ----------
+        # (we store both arms if present; you append to robot_L.box_data in run())
+        for side, robot in (("L", getattr(self, "robot_L", None)), ("R", getattr(self, "robot_R", None))):
+            try:
+                if robot is not None and hasattr(robot, "box_data") and robot.box_data:
+                    # Expect tuples like (pos, rotmat) or similar; normalize with NaNs when missing
+                    bpos, brot = [], []
+                    for item in robot.box_data:
+                        if not item:  # None
+                            bpos.append([np.nan, np.nan, np.nan]); brot.append(np.full((3,3), np.nan))
+                        else:
+                            # support (pos, R) OR (pos, R, ...) shapes
+                            pos = item[0] if len(item) >= 1 else None
+                            Rm  = item[1] if len(item) >= 2 else None
+                            if pos is None: pos = [np.nan, np.nan, np.nan]
+                            if Rm is None:  Rm = np.full((3,3), np.nan)
+                            bpos.append(np.array(pos, dtype=float).reshape(3,))
+                            Rm = np.array(Rm, dtype=float)
+                            if Rm.size == 9: Rm = Rm.reshape(3,3)
+                            else:            Rm = np.full((3,3), np.nan)
+                            brot.append(Rm)
+                    pack[f"box__{side}_positions"] = np.vstack(bpos) if bpos else np.zeros((0,3))
+                    pack[f"box__{side}_rotmats"]   = np.stack(brot) if brot else np.zeros((0,3,3))
+            except Exception:
+                pass
+
+        # ---------- meta / config ----------
+        pack["meta__Hz"]     = float(getattr(self, "Hz", np.nan))
+        pack["meta__dt"]     = float(getattr(self, "dt", np.nan))
+        pack["meta__lambda_reg"] = float(getattr(self, "lambda_reg", np.nan))
+        pack["meta__v_max"]  = float(getattr(self, "v_max", np.nan))
+        pack["meta__ref_force"] = float(getattr(self, "ref_force", np.nan))
+        for name in ("joint_pose_limit","joint_speed_limit","joint_accel_limit"):
+            if hasattr(self, name):
+                pack[f"meta__{name}"] = float(getattr(self, name))
+
+        # admittance params (per arm – stored both as L/R even if equal)
+        for side in ("L","R"):
+            for n in ("M_a","D_a","K_a"):
+                key = f"{n}_{side}"
+                if hasattr(self, key):
+                    pack[f"meta__{key}"] = float(getattr(self, key))
+
+        # weights / stiffness K
+        def _try_arr(name, val):
+            try:
+                pack[f"meta__{name}"] = np.array(val, dtype=float)
+            except Exception:
+                pass
+
+        _try_arr("W_imp_L", getattr(self, "W_imp_L", None))
+        _try_arr("W_imp_R", getattr(self, "W_imp_R", None))
+        _try_arr("W_grasp_L", getattr(self, "W_grasp_L_np", None))
+        _try_arr("W_grasp_R", getattr(self, "W_grasp_R_np", None))
+        # per-robot impedance K (from URImpedanceController instances)
+        for side, robot in (("L", getattr(self, "robot_L", None)), ("R", getattr(self, "robot_R", None))):
+            if robot is not None and hasattr(robot, "K"):
+                _try_arr(f"K_{side}", robot.K)
+
+        # grasp points / normals in base frame (from _init_grasping_data)
+        for name in ("grasping_point_L_base","grasping_point_R_base","normal_L_base","normal_R_base"):
+            if hasattr(self, name):
+                _try_arr(f"meta__{name}", getattr(self, name))
+        # same in world if you want them:
+        for name in ("grasping_point_L_world","grasping_point_R_world","normal_L_world","normal_R_world"):
+            if hasattr(self, name):
+                _try_arr(f"meta__{name}", getattr(self, name))
+
+        # performance counters
+        for n in ("_total_iters","_total_solver_time","_total_deadline_miss"):
+            if hasattr(self, n):
+                val = getattr(self, n)
+                try:
+                    pack[f"meta__{n}"] = float(val)
+                except Exception:
+                    pass
+
+        # ---------- plot artifacts (paths only) ----------
+        plot_paths = []
+        try:
+            if os.path.isdir("plots"):
+                for fn in os.listdir("plots"):
+                    if fn.lower().endswith((".png",".jpg",".jpeg",".pdf")):
+                        plot_paths.append(os.path.join("plots", fn))
+        except Exception:
+            pass
+        pack["artifacts__plot_paths"] = np.array(plot_paths, dtype=object)
+
+        # ---------- planner file path ----------
+        try:
+            pack["meta__planner_npz_path"] = np.array(getattr(self, "_npz_path",""), dtype=object)
+        except Exception:
+            pass
+
+        # ---------- save ----------
+        np.savez_compressed(out_path, **pack)
+        print(f"[SAVED] {out_path}")
+        return out_path
 
 
 if __name__ == "__main__":
@@ -1031,7 +1270,7 @@ if __name__ == "__main__":
     v_max = 0.05
     Fn_ref = 25.0
 
-    traj_path = "motion_planner/trajectories_old/twist.npz"
+    traj_path = "motion_planner/trajectories_old/twist_fast.npz"
     Hz = 50
 
     ctrl = DualArmImpedanceAdmittanceQP(

@@ -30,6 +30,20 @@ def flip_y_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
     r_fixed = R.from_rotvec(rotvecs)
     return r_fixed.as_matrix()
 
+def flip_x_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
+    rot_matrices = np.asarray(rot_matrices)
+    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), \
+        "Expected rot_matrices with shape (N, 3, 3)"
+
+    r = R.from_matrix(rot_matrices)
+    rotvecs = r.as_rotvec() 
+
+    rotvecs[:, 0] *= -1.0
+
+    # Back to matrices
+    r_fixed = R.from_rotvec(rotvecs)
+    return r_fixed.as_matrix()
+
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
 
