@@ -1,4 +1,4 @@
-from control.pid_ff_controller import URForceController
+from control.PID.pid_ff_controller import URForceController
 import numpy as np
 import time
 
@@ -119,6 +119,9 @@ if __name__ == "__main__":
 
         robotR.plot_data3D()
         robotL.plot_data3D()
+
+        robotR.save_everything("pick_and_place_right")
+        robotL.save_everything("pick_and_place_left")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

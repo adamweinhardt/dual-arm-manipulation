@@ -346,7 +346,7 @@ class GraspingPointsPublisher:
         self,
         config_path: str,
         port: int = 5560,
-        publish_rate_hz: float = 20.0,
+        publish_rate_hz: float = 100.0,
         approach_offset: float = 0.05,
     ):
         self.config_path = config_path
@@ -416,11 +416,13 @@ class GraspingPointsPublisher:
                                 "box_x_dim": box.x_dim,
                                 "box_y_dim": box.y_dim,
                                 "box_z_dim": box.z_dim,
+                                "box_position": box.position.tolist(),                # [x, y, z]
+                                "box_quaternion_wxyz": box.quaternions.tolist(),     # [w, x, y, z]
+                                "box_rotation_matrix": box.rotation_matrix.tolist(), # 3x3
                             }
                         print("-----")
-                        print(box.x_dim)
-                        print(box.y_dim)
-                        print(box.z_dim)
+                        print(box.position.tolist())
+                        print(box.rotation_matrix.tolist())
                         print("-----")
                     if grasping_data:
                         message = {

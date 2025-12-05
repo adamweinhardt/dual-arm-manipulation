@@ -548,56 +548,131 @@ class MotionPlanner:
         start_pose: np.ndarray,
         end_pose: np.ndarray,
         dt: float,
-        max_velocity: float = None,
-        max_acceleration: float = None,
-    ) -> Trajectory:
-        start_position = start_pose[:3, 3]
-        end_position = end_pose[:3, 3]
-        start_rotation = start_pose[:3, :3]
-        end_rotation = end_pose[:3, :3]
+        max_lin_vel: float = 0.5,          # NEW: max linear speed  [m/s]
+        max_lin_acc: float = 0.25,          # NEW: max linear accel  [m/s^2]
+        max_ang_vel: float = 0.5,          # NEW: max angular speed [rad/s]
+        max_ang_acc: float = 0.25,          # NEW: max angular accel [rad/s^2]
+    ) -> "Trajectory":
+        """
+        Linear SE(3) interpolation with SEPARATE linear and angular limits.
 
-        # Calculate path lengths
+        If max_lin_*/max_ang_* are not given, falls back to legacy
+        max_velocity / max_acceleration (same bound used for both).
+        """
+        start_position = start_pose[:3, 3]
+        end_position   = end_pose[:3, 3]
+        start_rotation = start_pose[:3, :3]
+        end_rotation   = end_pose[:3, :3]
+
+        # Distances
         linear_distance = np.linalg.norm(end_position - start_position)
 
         start_rot = Rotation.from_matrix(start_rotation)
-        end_rot = Rotation.from_matrix(end_rotation)
-        rel_rotation = end_rot * start_rot.inv()
-        angular_distance = np.linalg.norm(rel_rotation.as_rotvec())
+        end_rot   = Rotation.from_matrix(end_rotation)
+        rel_rotation     = end_rot * start_rot.inv()
+        angular_distance = np.linalg.norm(rel_rotation.as_rotvec())  # [rad]
 
-        dominant_distance = max(linear_distance, angular_distance)
+        # If still None, we treat that component as "unconstrained" and
+        # will just run it at constant speed over the chosen duration.
 
-        if max_acceleration and max_velocity:
-            # Trapezoidal velocity profile with acceleration limits
-            # Time to reach max velocity: t_accel = v_max / a_max
-            # Distance during acceleration: s_accel = 0.5 * a_max * t_accel^2
-            t_accel = max_velocity / max_acceleration
-            s_accel = 0.5 * max_acceleration * t_accel**2
+        # ---------- small helpers: 1D trapezoidal/triangular profile ----------
+        def build_profile(D, v_max, a_max):
+            """
+            Build minimal-time 1D profile for distance D (>=0) with
+            velocity limit v_max and accel limit a_max.
+            Returns (T_min, v_peak, a_used, triangular_flag).
+            If v_max or a_max is None or D == 0, returns (0, 0, 0, True).
+            """
+            if D <= 0 or v_max is None or a_max is None or v_max <= 0 or a_max <= 0:
+                return 0.0, 0.0, 0.0, True
 
-            if dominant_distance <= 2 * s_accel:
-                # Triangular profile (never reach max velocity)
-                # s = 0.5 * a * t^2, so t = sqrt(2*s/a)
-                t_accel = np.sqrt(dominant_distance / max_acceleration)
-                trajectory_time = 2 * t_accel
-                actual_max_velocity = max_acceleration * t_accel
+            t_acc  = v_max / a_max
+            s_acc  = 0.5 * a_max * t_acc**2
+
+            if D <= 2 * s_acc:
+                # triangular: never reach v_max
+                t_acc = np.sqrt(D / a_max)
+                T_min = 2 * t_acc
+                v_peak = a_max * t_acc
+                return T_min, v_peak, a_max, True
             else:
-                # Trapezoidal profile (reach max velocity)
-                s_constant = dominant_distance - 2 * s_accel
-                t_constant = s_constant / max_velocity
-                trajectory_time = 2 * t_accel + t_constant
-                actual_max_velocity = max_velocity
+                # trapezoidal
+                s_const = D - 2 * s_acc
+                t_const = s_const / v_max
+                T_min = 2 * t_acc + t_const
+                v_peak = v_max
+                return T_min, v_peak, a_max, False
 
-        elif max_velocity:
-            # Constant velocity (no acceleration limit)
-            trajectory_time = dominant_distance / max_velocity
-            actual_max_velocity = max_velocity
+        def eval_profile(t, D, v_max, a_max, T_min, v_peak, a_used, triangular):
+            """
+            Evaluate s(t), s_dot(t), s_ddot(t) for a given 1D profile.
+            If v_max/a_max are None or D==0 or T_min==0 => stays at 0.
+            """
+            if D <= 0 or v_max is None or a_max is None or v_max <= 0 or a_max <= 0 or T_min <= 0:
+                return 0.0, 0.0, 0.0
 
+            # Clamp t to [0, T_min]
+            if t <= 0.0:
+                return 0.0, 0.0, 0.0
+            if t >= T_min:
+                return D, 0.0, 0.0
+
+            if triangular:
+                t_acc = T_min * 0.5
+                if t <= t_acc:
+                    # accel phase
+                    s      = 0.5 * a_used * t**2
+                    s_dot  = a_used * t
+                    s_ddot = a_used
+                else:
+                    # decel phase (mirror)
+                    td     = T_min - t
+                    s      = D - 0.5 * a_used * td**2
+                    s_dot  = a_used * td
+                    s_ddot = -a_used
+                return s, s_dot, s_ddot
+            else:
+                # trapezoid: accel -> const -> decel
+                t_acc = v_peak / a_used
+                s_acc = 0.5 * a_used * t_acc**2
+                t_const = T_min - 2 * t_acc
+
+                if t <= t_acc:
+                    s      = 0.5 * a_used * t**2
+                    s_dot  = a_used * t
+                    s_ddot = a_used
+                elif t <= t_acc + t_const:
+                    s      = s_acc + v_peak * (t - t_acc)
+                    s_dot  = v_peak
+                    s_ddot = 0.0
+                else:
+                    td     = T_min - t
+                    s      = D - 0.5 * a_used * td**2
+                    s_dot  = a_used * td
+                    s_ddot = -a_used
+                return s, s_dot, s_ddot
+
+        # ---------- build separate linear & angular profiles ----------
+        T_lin_min, v_lin_peak, a_lin_used, tri_lin = build_profile(
+            linear_distance, max_lin_vel, max_lin_acc
+        )
+        T_ang_min, v_ang_peak, a_ang_used, tri_ang = build_profile(
+            angular_distance, max_ang_vel, max_ang_acc
+        )
+
+        # Global motion duration: big enough for both
+        T_total = max(T_lin_min, T_ang_min, 0.0)
+        if T_total <= 0:
+            # Degenerate: no motion
+            trajectory_time = 0.0
         else:
-            # Original method: distance-based discretization
-            num_steps = max(1, int(dominant_distance / dt))
-            trajectory_time = num_steps * dt
-            actual_max_velocity = (
-                dominant_distance / trajectory_time if trajectory_time > 0 else 0
-            )
+            trajectory_time = T_total
+
+        # Fallback: if everything degenerate, match previous logic (one step)
+        if trajectory_time == 0.0:
+            num_steps = 1
+        else:
+            num_steps = max(1, int(np.round(trajectory_time / dt)))
 
         params = {
             "start_position": start_position.tolist(),
@@ -608,114 +683,73 @@ class MotionPlanner:
             "dt": dt,
             "linear_distance": linear_distance,
             "angular_distance": angular_distance,
-            "max_velocity": max_velocity,
-            "max_acceleration": max_acceleration,
+            "max_lin_vel": max_lin_vel,
+            "max_lin_acc": max_lin_acc,
+            "max_ang_vel": max_ang_vel,
+            "max_ang_acc": max_ang_acc,
         }
 
         trajectory = Trajectory("linear", params)
-        num_steps = int(trajectory_time / dt)
+
+        # Slerp for orientation; we'll drive it with an "alpha_ang" in [0,1]
         slerp = Slerp([0, 1], Rotation.from_matrix([start_rotation, end_rotation]))
 
-        # Generate waypoints with proper velocity/acceleration profiles
         for i in range(num_steps + 1):
-            t = i * dt
-
-            # Calculate motion profile parameters
-            if max_acceleration and max_velocity:
-                t_accel = (
-                    max_velocity / max_acceleration
-                    if dominant_distance
-                    > 2
-                    * (0.5 * max_acceleration * (max_velocity / max_acceleration) ** 2)
-                    else np.sqrt(dominant_distance / max_acceleration)
-                )
-
-                if t <= t_accel:
-                    # Acceleration phase
-                    alpha = 0.5 * max_acceleration * t**2 / dominant_distance
-                    velocity_magnitude = max_acceleration * t
-                    acceleration_magnitude = max_acceleration
-                elif t <= trajectory_time - t_accel:
-                    # Constant velocity phase
-                    s_accel = 0.5 * max_acceleration * t_accel**2
-                    s_const = actual_max_velocity * (t - t_accel)
-                    alpha = (s_accel + s_const) / dominant_distance
-                    velocity_magnitude = actual_max_velocity
-                    acceleration_magnitude = 0
-                else:
-                    # Deceleration phase
-                    t_decel = trajectory_time - t
-                    s_accel = 0.5 * max_acceleration * t_accel**2
-                    s_const = (
-                        actual_max_velocity * (trajectory_time - 2 * t_accel)
-                        if trajectory_time > 2 * t_accel
-                        else 0
-                    )
-                    # Fix: calculate distance traveled during deceleration from the END
-                    s_decel = 0.5 * max_acceleration * t_decel**2
-                    alpha = (dominant_distance - s_decel) / dominant_distance
-                    velocity_magnitude = max_acceleration * t_decel
-                    acceleration_magnitude = -max_acceleration
+            if trajectory_time == 0.0:
+                t = 0.0
             else:
-                # Simple linear interpolation
-                alpha = t / trajectory_time if trajectory_time > 0 else 0
-                velocity_magnitude = (
-                    dominant_distance / trajectory_time if trajectory_time > 0 else 0
-                )
-                acceleration_magnitude = 0
+                t = min(i * dt, trajectory_time)
 
-            # Clamp alpha to [0, 1]
-            alpha = max(0, min(1, alpha))
-
-            # Calculate position and rotation
-            position = start_position + alpha * (end_position - start_position)
-            rotation = slerp(alpha).as_matrix()
-
-            # Calculate velocity and acceleration vectors
-            if linear_distance > 0:
+            # Linear profile (on arc length D_lin)
+            s_lin, sdot_lin, sddot_lin = eval_profile(
+                t, linear_distance, max_lin_vel, max_lin_acc,
+                T_lin_min, v_lin_peak, a_lin_used, tri_lin
+            )
+            if linear_distance > 1e-9:
+                alpha_lin = s_lin / linear_distance
+                alpha_lin = max(0.0, min(1.0, alpha_lin))
                 linear_direction = (end_position - start_position) / linear_distance
-                linear_velocity = (
-                    linear_direction
-                    * velocity_magnitude
-                    * (linear_distance / dominant_distance)
-                )
-                linear_acceleration = (
-                    linear_direction
-                    * acceleration_magnitude
-                    * (linear_distance / dominant_distance)
-                )
             else:
-                linear_velocity = np.zeros(3)
-                linear_acceleration = np.zeros(3)
+                alpha_lin = 0.0
+                linear_direction = np.zeros(3)
 
-            if angular_distance > 0:
-                angular_direction = rel_rotation.as_rotvec() / angular_distance
-                angular_velocity = (
-                    angular_direction
-                    * velocity_magnitude
-                    * (angular_distance / dominant_distance)
-                )
-                angular_acceleration = (
-                    angular_direction
-                    * acceleration_magnitude
-                    * (angular_distance / dominant_distance)
-                )
+            position = start_position + alpha_lin * (end_position - start_position)
+            linear_velocity = linear_direction * sdot_lin
+            linear_acceleration = linear_direction * sddot_lin
+
+            # Angular profile (on angle D_ang)
+            s_ang, sdot_ang, sddot_ang = eval_profile(
+                t, angular_distance, max_ang_vel, max_ang_acc,
+                T_ang_min, v_ang_peak, a_ang_used, tri_ang
+            )
+            if angular_distance > 1e-9:
+                alpha_ang = s_ang / angular_distance
+                alpha_ang = max(0.0, min(1.0, alpha_ang))
+                rot_axis = rel_rotation.as_rotvec() / angular_distance
             else:
-                angular_velocity = np.zeros(3)
-                angular_acceleration = np.zeros(3)
+                alpha_ang = 0.0
+                rot_axis = np.zeros(3)
+
+            # Orientation from slerp driven by angular progress
+            rotation = slerp(alpha_ang).as_matrix()
+
+            # Angular velocity/acceleration in body/world frame
+            angular_velocity = rot_axis * sdot_ang
+            angular_acceleration = rot_axis * sddot_ang
 
             trajectory.add_waypoint(
-                position,
-                rotation,
-                linear_velocity,
-                angular_velocity,
-                linear_acceleration,
-                angular_acceleration,
-                i,
-                t,
+                position=position,
+                rotation=rotation,
+                linear_velocity=linear_velocity,
+                angular_velocity=angular_velocity,
+                linear_acceleration=linear_acceleration,
+                angular_acceleration=angular_acceleration,
+                index=i,
+                time=t,
             )
 
         return trajectory
+
     
     def circular(
         self,
@@ -1186,167 +1220,11 @@ if __name__ == "__main__":
 
     hz = 100
     dt = 1 / hz
-    up = planner.linear(pose1, pose2, dt, max_velocity=0.5, max_acceleration=0.25)
-    UP = planner.linear(pose1, pose9, dt, max_velocity=0.25, max_acceleration=0.1)
-    side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
-    down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
-    twist = planner.linear(pose2, pose5, dt, max_velocity=0.25, max_acceleration=0.1)
-    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.25, max_acceleration=0.2)
-    side_y_back = planner.linear(
-        pose6, pose2, dt, max_velocity=0.25, max_acceleration=0.2
-    )
-    hold_side = planner.hold(pose6, 1.0, dt)
-    hold_middle = planner.hold(pose2, 1.0, dt)
+    max_lin_vel = 0.5 
+    max_lin_acc = 0.25
+    max_ang_vel = 0.5
+    max_ang_acc = 0.25
 
-    hold_t = 1
-    hold_0 = planner.hold(pose2, hold_t, dt)
-    side_y = planner.linear(pose2, pose6, dt, max_velocity=0.15, max_acceleration=0.15)
-    hold_1 = planner.hold(pose6, hold_t, dt)
-    side_x = planner.linear(pose6, pose7, dt, max_velocity=0.15, max_acceleration=0.15)
-    hold_2 = planner.hold(pose7, hold_t, dt)
-    side_y_b = planner.linear(pose7, pose8, dt, max_velocity=0.15, max_acceleration=0.15)
-    hold_3 = planner.hold(pose8, hold_t, dt)
-    side_x_b = planner.linear(pose8, pose2, dt, max_velocity=0.15, max_acceleration=0.15)
-    down = planner.linear(pose2, pose1, dt, max_velocity=0.15, max_acceleration=0.15)
-    hold_9 = planner.hold(pose9, hold_t, dt)
-
-    
-    circle = planner.circular(
-        start_pose=pose2,
-        dt=dt,
-        radius=0.2,
-        max_velocity=0.25,        # m/s along arc
-        max_acceleration=0.2,    # m/s^2 along arc
-        keep_orientation=True,     # keep same tool orientation
-        ccw=True,
-        label="circle_xy_ccw"
-    )
-
-    # Helper to build poses from position + euler (deg)
-    def make_pose(pos, euler_deg):
-        R = Rotation.from_euler("xyz", np.deg2rad(euler_deg)).as_matrix()
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = np.array(pos)
-        return T
-
-    pose_down = make_pose([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
-    pose_up   = make_pose([0.0, 0.0, 0.2], [0.0, 0.0, 0.0])
-
-    offset = 0.05
-
-    # A few intermediate poses (no rotation, just position)
-    pose_xy_1 = make_pose([ 0.15 ,  0.05, 0.4], [0.0, 0.0, 0.30])  # up & diagonal
-    pose_xy_2 = make_pose([-0.20 ,  0.00, 0.30], [0.0, 0.0, -0.30])  # other side
-    pose_xz_1 = make_pose([ 0, -0.1, 0.35], [0.0, 0.0, 0.0])  # for XZ circle
-    pose_mid  = make_pose([-0.1, -0.05, 0.05], [0.0, 0.0, 0.0])  # back towards center
-
-    hz = 100.0
-    dt = 1.0 / hz
-
-    # 1) Lift up from table (moderate speed)
-    seg_lift = planner.linear(
-        start_pose=pose_down,
-        end_pose=pose_up,
-        dt=dt,
-        max_velocity=0.20,
-        max_acceleration=0.40,
-    )
-    hold_up = planner.hold(pose_up, duration=0.5, dt=dt)
-
-    # 2) Move diagonally in XY and up in Z
-    seg_1 = planner.linear(
-        start_pose=pose_up,
-        end_pose=pose_xy_1,
-        dt=dt,
-        max_velocity=0.30,
-        max_acceleration=0.60,
-    )
-
-    # 3) Fast XY-plane circle around pose_xy_1
-    circle_xy = planner.circular(
-        start_pose=pose_xy_1,
-        dt=dt,
-        radius=0.15,
-        max_velocity=0.35,       # faster
-        max_acceleration=0.70,
-        keep_orientation=True,   # keep identity rotation
-        ccw=True,
-        label="circle_xy_fast",
-    )
-
-    # 4) Linear move to another pose
-    seg_2 = planner.linear(
-        start_pose=pose_xy_1,
-        end_pose=pose_xy_2,
-        dt=dt,
-        max_velocity=0.25,
-        max_acceleration=0.50,
-    )
-
-    # 5) Move upward & sideways to prepare for XZ circle
-    seg_3 = planner.linear(
-        start_pose=pose_xy_2,
-        end_pose=pose_xz_1,
-        dt=dt,
-        max_velocity=0.30,
-        max_acceleration=0.60,
-    )
-
-    # 6) XZ-plane circle (slightly slower, opposite direction)
-    circle_xz = planner.circular_xz(
-        start_pose=pose_xz_1,
-        dt=dt,
-        radius=0.15,
-        max_velocity=0.25,
-        max_acceleration=0.50,
-        keep_orientation=True,   # still no rotations
-        ccw=False,
-        label="circle_xz_slow",
-    )
-
-    # 7) Come back towards center-ish
-    seg_4 = planner.linear(
-        start_pose=pose_xz_1,
-        end_pose=pose_mid,
-        dt=dt,
-        max_velocity=0.30,
-        max_acceleration=0.60,
-    )
-
-    # 8) Go back to the lifted pose above the start
-    seg_5 = planner.linear(
-        start_pose=pose_mid,
-        end_pose=pose_up,
-        dt=dt,
-        max_velocity=0.20,
-        max_acceleration=0.40,
-    )
-
-    # 9) Finally go back down to the exact starting pose
-    seg_down = planner.linear(
-        start_pose=pose_up,
-        end_pose=pose_down,
-        dt=dt,
-        max_velocity=0.15,
-        max_acceleration=0.30,
-    )
-
-    # Concatenate everything into one stress-test trajectory
-    # full_trajectory = planner.concatenate_trajectories(
-    #     [
-    #         seg_lift,
-    #         hold_up,
-    #         seg_1,
-    #         circle_xy,
-    #         seg_2,
-    #         seg_3,
-    #         circle_xz,
-    #         seg_4,
-    #         seg_5,
-    #         seg_down,
-    #     ]
-    # )
     theta = np.deg2rad(30.0)
     R_y = np.array([
         [ np.cos(theta),  0.0, np.sin(theta)],
@@ -1360,84 +1238,50 @@ if __name__ == "__main__":
     twist_y = planner.linear(
         pose2,
         pose_twist_y,
-        dt,
-        max_velocity=0.25,
-        max_acceleration=0.1,
+        dt
     )
 
-    theta = np.deg2rad(45.0)
-    R_x = np.array([
-        [1.0,           0.0,            0.0],
-        [0.0,  np.cos(theta), -np.sin(theta)],
-        [0.0,  np.sin(theta),  np.cos(theta)],
-    ])
+    up = planner.linear(pose1, pose2, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc)
+    # UP = planner.linear(pose1, pose9, dt, max_velocity=0.25, max_acceleration=0.1)
+    # side = planner.linear(pose2, pose3, dt, max_velocity=0.5, max_acceleration=0.25)
+    # down = planner.linear(pose3, pose4, dt, max_velocity=0.5, max_acceleration=0.25)
+    # twist = planner.linear(pose2, pose5, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc)
+    # side_y = planner.linear(pose2, pose6, dt, max_velocity=0.25, max_acceleration=0.2)
+    # side_y_back = planner.linear(
+    #     pose6, pose2, dt, max_velocity=0.25, max_acceleration=0.2
+    # )
+    # hold_side = planner.hold(pose6, 1.0, dt)
+    # hold_middle = planner.hold(pose2, 1.0, dt)
 
-    pose_twist_x = pose2.copy()
-    pose_twist_x[:3, :3] = pose2[:3, :3] @ R_x 
+    # hold_t = 1
+    # hold_0 = planner.hold(pose2, hold_t, dt)
+    # side_y = planner.linear(pose2, pose6, dt, max_velocity=0.15, max_acceleration=0.15)
+    # hold_1 = planner.hold(pose6, hold_t, dt)
+    # side_x = planner.linear(pose6, pose7, dt, max_velocity=0.15, max_acceleration=0.15)
+    # hold_2 = planner.hold(pose7, hold_t, dt)
+    # side_y_b = planner.linear(pose7, pose8, dt, max_velocity=0.15, max_acceleration=0.15)
+    # hold_3 = planner.hold(pose8, hold_t, dt)
+    # side_x_b = planner.linear(pose8, pose2, dt, max_velocity=0.15, max_acceleration=0.15)
+    # down = planner.linear(pose2, pose1, dt, max_velocity=0.15, max_acceleration=0.15)
+    # hold_9 = planner.hold(pose9, hold_t, dt)
 
-    twist_x = planner.linear(
-        pose2,
-        pose_twist_x,
-        dt,
-        max_velocity=0.25,
-        max_acceleration=0.1,
-    )
+    
+    # circle = planner.circular(
+    #     start_pose=pose2,
+    #     dt=dt,
+    #     radius=0.2,
+    #     max_velocity=0.25,        # m/s along arc
+    #     max_acceleration=0.2,    # m/s^2 along arc
+    #     keep_orientation=True,     # keep same tool orientation
+    #     ccw=True,
+    #     label="circle_xy_ccw"
+    # )
 
-    def mirror_reference_rotations_y(in_npz: str,
-                                 out_npz: str = "motion_planner/trajectories_old/twist_y_mirrored.npz") -> None:
-        """
-        Load a reference trajectory NPZ (box/world reference),
-        mirror **all rotations** by 180° about the LOCAL Y axis at every waypoint,
-        and save a new NPZ with identical positions/velocities/accelerations.
 
-        R'(k) = R(k) @ R_y(pi),  where R_y(pi) = diag([-1, 1, -1])
-        """
-        if not in_npz.endswith(".npz"):
-            in_npz += ".npz"
-        os.makedirs(os.path.dirname(out_npz), exist_ok=True)
-
-        data = np.load(in_npz, allow_pickle=True)
-
-        # Pull as-is (positions and all kinematics preserved)
-        trajectory_type   = str(data["trajectory_type"])
-        parameters        = data["parameters"].item() if "parameters" in data else {}
-        time              = data["time"]
-        position          = data["position"]
-        Rmats             = data["rotation_matrices"]            # shape [N, 3, 3]
-        lin_vel           = data["linear_velocity"]
-        ang_vel           = data["angular_velocity"]
-        lin_acc           = data["linear_acceleration"]
-        ang_acc           = data["angular_acceleration"]
-
-        # Mirror rotations about LOCAL Y: post-multiply by R_y(pi)
-        Ry_pi = np.diag([-1.0, 1.0, -1.0])
-        Rmats_mirrored = Rmats @ Ry_pi
-
-        # Optional: regenerate Euler (xyz) for convenience
-        euler_mirrored = Rotation.from_matrix(Rmats_mirrored).as_euler("xyz")
-
-        # Save mirrored copy
-        if not out_npz.endswith(".npz"):
-            out_npz += ".npz"
-        np.savez_compressed(
-            out_npz,
-            trajectory_type=trajectory_type,
-            parameters=parameters,
-            time=time,
-            position=position,
-            rotation_matrices=Rmats_mirrored,
-            euler_angles=euler_mirrored,
-            linear_velocity=lin_vel,
-            angular_velocity=ang_vel,
-            linear_acceleration=lin_acc,
-            angular_acceleration=ang_acc,
-        )
-        print(f"Saved mirrored trajectory: {out_npz}  | waypoints: {len(time)}")
-
-    #full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
+    # full_trajectory = planner.concatenate_trajectories([up, hold_middle, side_y, hold_side, side_y_back, hold_middle, side_y, hold_side, side_y_back]) #side_y
     # full_trajectory = planner.concatenate_trajectories([up, hold_0, side_y, hold_1, side_x, hold_2, side_y_b, hold_3, side_x_b, hold_0, down]) #side_y #rectangle
     # full_trajectory = planner.concatenate_trajectories([up, circle, down]) #circle
-    full_trajectory = planner.concatenate_trajectories([up, twist_x]) #twist
+    full_trajectory = planner.concatenate_trajectories([up, twist_y]) #twist
     #full_trajectory = planner.concatenate_trajectories([UP, hold_9])
     fig3d, _ = full_trajectory.plot_3d()
     fig3d.savefig("plots/trajectory_3d.png", dpi=150, bbox_inches="tight")
@@ -1449,7 +1293,5 @@ if __name__ == "__main__":
     import os
     os.makedirs("plots", exist_ok=True)
 
-    #full_trajectory.save_trajectory("motion_planner/trajectories_old/twist_x.npz")
+    full_trajectory.save_trajectory("motion_planner/trajectories_old/twist_y.npz")
 
-    mirror_reference_rotations_y("motion_planner/trajectories_old/twist.npz",
-                                "motion_planner/trajectories_old/twist_mirrored.npz")
