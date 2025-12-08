@@ -108,7 +108,7 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=None,
+            deadzone_threshold=0,
         )
 
         robotL.control_to_target(
@@ -116,7 +116,7 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=None,
+            deadzone_threshold=0,
         )
 
         robotR.wait_for_control()

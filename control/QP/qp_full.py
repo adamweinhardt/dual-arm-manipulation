@@ -15,7 +15,7 @@ from numpy.linalg import solve, eigh
 # project deps
 from control.PID.pid_ff_controller import URForceController
 from utils.utils import _freeze_sparsity, _as_rowvec_1d, short_arc_log, diag6
-
+from control.PID.pid_controller import flip_xy_component_in_rotation, flip_x_component_in_rotations
 
 class URImpedanceController(URForceController):
     def __init__(self, ip, K):
@@ -252,7 +252,7 @@ class DualArmImpedanceAdmittanceQP:
             # Right (mirrored)
             self.p_ref_R[t] = p0_R + p_box[t] * [-1, -1, 1]
             self.v_ref_R[t] = v_box[t] * [-1, -1, 1]
-            self.R_ref_R[t] = R_rel @ R0_R
+            self.R_ref_R[t] = flip_xy_component_in_rotation(R_rel) @ R0_R
             self.w_ref_R[t] = w_box[t]
 
             self.p_ref_L[t] += delta_base_L[t]
