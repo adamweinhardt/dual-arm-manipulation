@@ -249,6 +249,212 @@ class PostProcess:
 
         print("\n=========================================================\n")
 
+    def evaluate_QP2(self, qp_path: str, skip_seconds: float = 0.0,
+                    sample_rate_hz: float | None = None,
+                    time_key: str | None = None):
+        """
+        Evaluate dual-arm QP tracking (force, position, rotation, velocity, angular velocity)
+        from one .npz produced by DualArmImpedanceAdmittanceQP.save_everything().
+
+        Parameters
+        ----------
+        qp_path : str
+            Path to the saved .npz log.
+        skip_seconds : float, optional
+            Ignore the first `skip_seconds` seconds of the trajectory when computing RMSE.
+            If a time vector is present (see `time_key` or auto-detected), it will be used.
+            Otherwise uses `dt` in the file or `sample_rate_hz` if provided. Default 0.0.
+        sample_rate_hz : float, optional
+            Fallback sampling rate (Hz) if no time vector or dt is found.
+        time_key : str, optional
+            Name of the time vector in the .npz (e.g., "t"). If None, tries common names:
+            ["t", "time", "times", "timestamp", "timestamps", "qp_time", "log_time"].
+
+        Notes
+        -----
+        Rotation RMSE is computed from the relative rotation log-map:
+            e_r = log(R_ref^T R_meas), with
+            component RMSE on e_r and angle RMSE = RMSE(||e_r||).
+        """
+        print("\n================ QP TRACKING EVALUATION =================")
+
+        try:
+            data = np.load(qp_path, allow_pickle=True)
+        except Exception as e:
+            print(f"Could not load '{qp_path}': {e}")
+            return
+
+        print(f"file: {qp_path}")
+
+        # --- determine trim index from skip_seconds ---
+        def _compute_i0():
+            if skip_seconds <= 0:
+                return 0, None
+
+            # 1) explicit time_key if provided
+            if time_key is not None and time_key in data:
+                t = np.asarray(data[time_key]).reshape(-1)
+                t0 = float(t[0])
+                target = t0 + float(skip_seconds)
+                i0 = int(np.searchsorted(t, target, side="left"))
+                return max(i0, 0), ("time", time_key, t0)
+
+            # 2) try common time keys
+            for k in ["t", "time", "times", "timestamp", "timestamps", "qp_time", "log_time"]:
+                if k in data:
+                    t = np.asarray(data[k]).reshape(-1)
+                    t0 = float(t[0])
+                    target = t0 + float(skip_seconds)
+                    i0 = int(np.searchsorted(t, target, side="left"))
+                    return max(i0, 0), ("time", k, t0)
+
+            # 3) use dt if present
+            for k in ["dt", "DT", "sample_dt"]:
+                if k in data:
+                    try:
+                        dt = float(np.asarray(data[k]).reshape(()))
+                        if dt > 0:
+                            i0 = int(np.floor(skip_seconds / dt + 1e-12))
+                            return max(i0, 0), ("dt", k, dt)
+                    except Exception:
+                        pass
+
+            # 4) fallback to provided sample rate
+            if sample_rate_hz is not None and sample_rate_hz > 0:
+                i0 = int(np.floor(skip_seconds * float(sample_rate_hz)))
+                return max(i0, 0), ("Hz", "sample_rate_hz", float(sample_rate_hz))
+
+            # 5) nothing found
+            return 0, None
+
+        i0, trim_basis = _compute_i0()
+        if skip_seconds > 0:
+            if trim_basis is None:
+                print(f"[Trim] Requested skip_seconds={skip_seconds:.3f}s, "
+                    f"but no time/dt/Hz found. Proceeding without trimming.")
+                i0 = 0
+            else:
+                kind, key, val = trim_basis
+                if kind == "time":
+                    print(f"[Trim] Skipping first {skip_seconds:.3f}s using time vector '{key}' "
+                        f"(t0={val:.6f}).")
+                elif kind == "dt":
+                    print(f"[Trim] Skipping first {skip_seconds:.3f}s using dt '{key}'={val:.6g}s "
+                        f"(i0={i0}).")
+                elif kind == "Hz":
+                    print(f"[Trim] Skipping first {skip_seconds:.3f}s using sample_rate_hz={val:.6g} "
+                        f"(i0={i0}).")
+
+        # helper: align, trim, and return (A,B,n)
+        def _prep(A, B):
+            A = np.asarray(A, dtype=float)
+            B = np.asarray(B, dtype=float)
+            n = min(len(A), len(B))
+            if n <= 0:
+                return None
+            # apply trim
+            if i0 >= n:
+                # everything trimmed away
+                return None
+            A = A[:n]; B = B[:n]
+            A = A[i0:]; B = B[i0:]
+            if A.ndim == 1: A = A[:, None]
+            if B.ndim == 1: B = B[:, None]
+            return A, B, len(A)
+
+        for arm in ("L", "R"):
+            print(f"\n=========== QP ARM {arm} ===========")
+
+            # --- Force ---
+            kF, kFref = f"F_{arm}_vec", f"F_{arm}_ref"
+            if kF in data and kFref in data:
+                prepped = _prep(data[kF], data[kFref])
+                if prepped is not None:
+                    A, B, n = prepped
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Force] samples      : {n}")
+                    print(f"RMSE Fx,Fy,Fz        : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [N]")
+                    print(f"RMSE ||F - F_ref||   : {rmse_norm:.4f} N")
+                else:
+                    print("\n[Force] no samples remain after trimming.")
+            else:
+                print("\n[Force] missing force logs for this arm.")
+
+            # --- Position ---
+            kp, kpref = f"p_{arm}", f"p_ref_{arm}"
+            if kp in data and kpref in data:
+                prepped = _prep(np.asarray(data[kp])[..., :3], np.asarray(data[kpref])[..., :3])
+                if prepped is not None:
+                    A, B, n = prepped
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Position] samples   : {n}")
+                    print(f"RMSE x,y,z           : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m]")
+                    print(f"RMSE ||p - p_ref||   : {rmse_norm:.4f} m")
+                else:
+                    print("\n[Position] no samples remain after trimming.")
+            else:
+                print("\n[Position] missing p / p_ref for this arm.")
+
+            # --- Rotation (via relative rotation log-map) ---
+            kr, krref = f"rvec_{arm}", f"rvec_ref_{arm}"
+            if kr in data and krref in data:
+                prepped = _prep(data[kr], data[krref])
+                if prepped is not None:
+                    r, r_ref, n = prepped
+                    Rm = Rotation.from_rotvec(r)
+                    Rr = Rotation.from_rotvec(r_ref)
+                    e_r = (Rr.inv() * Rm).as_rotvec()   # (n,3)
+                    rmse_axes = np.sqrt(np.mean(e_r**2, axis=0))
+                    ang = np.linalg.norm(e_r, axis=1)
+                    rmse_angle = float(np.sqrt(np.mean(ang**2)))  # == norm RMSE
+                    print(f"\n[Rotation] samples   : {n}")
+                    print(f"RMSE rotvec x,y,z    : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad]")
+                    print(f"RMSE ||r - r_ref||   : {rmse_angle:.4f} rad")
+                    print(f"RMSE rotation angle  : {rmse_angle:.4f} rad")
+                else:
+                    print("\n[Rotation] no samples remain after trimming.")
+            else:
+                print("\n[Rotation] missing rvec / rvec_ref for this arm.")
+
+            # --- Linear velocity ---
+            kv, kvref = f"v_{arm}", f"v_ref_{arm}"
+            if kv in data and kvref in data:
+                prepped = _prep(np.asarray(data[kv])[..., :3], np.asarray(data[kvref])[..., :3])
+                if prepped is not None:
+                    A, B, n = prepped
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Linear Velocity] samples : {n}")
+                    print(f"RMSE vx,vy,vz         : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m/s]")
+                    print(f"RMSE ||v - v_ref||    : {rmse_norm:.4f} m/s")
+                else:
+                    print("\n[Linear Velocity] no samples remain after trimming.")
+            else:
+                print("\n[Linear Velocity] missing v / v_ref for this arm.")
+
+            # --- Angular velocity ---
+            kw, kwref = f"w_{arm}", f"w_ref_{arm}"
+            if kw in data and kwref in data:
+                prepped = _prep(np.asarray(data[kw])[..., :3], np.asarray(data[kwref])[..., :3])
+                if prepped is not None:
+                    A, B, n = prepped
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Angular Velocity] samples: {n}")
+                    print(f"RMSE wx,wy,wz         : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad/s]")
+                    print(f"RMSE ||w - w_ref||    : {rmse_norm:.4f} rad/s")
+                else:
+                    print("\n[Angular Velocity] no samples remain after trimming.")
+            else:
+                print("\n[Angular Velocity] missing w / w_ref for this arm.")
+
+        print("\n=========================================================\n")
 
     def plot_PID(self):
         # pull what we need, skip if missing
@@ -345,6 +551,7 @@ class PostProcess:
             if a.ndim == 1: a = a[:, None]
             return a
 
+        # --- vectors from npz ---
         forces      = get2d("force_vector")
         pos         = get2d("position")
         ref_pos     = get2d("reference_position")
@@ -362,11 +569,11 @@ class PostProcess:
         tot_o = get2d("total_output_vector")
         r_out = get2d("rotation_output_vector")
 
-        # make ref_pos 3D if it's 6D
+        # --- make ref_pos 3D if it's 6D ---
         if ref_pos.shape[-1] == 6: ref_pos = ref_pos[:, :3]
         elif ref_pos.size and ref_pos.shape[-1] != 3: ref_pos = ref_pos[:, :3]
 
-        # norms inline
+        # --- helper norms ---
         def row_norm(a):
             a = np.asarray(a)
             if a.size == 0: return np.zeros(T.shape)
@@ -376,7 +583,7 @@ class PostProcess:
         force_mag     = row_norm(forces)
         ref_force_mag = row_norm(ref_forces)
 
-        # start position (prefer meta; fallback to first pos)
+        # --- start pos ---
         if "meta__start_position" in self.npz:
             start_pos = np.asarray(self.npz["meta__start_position"]).reshape(-1)
         elif pos.size:
@@ -385,7 +592,7 @@ class PostProcess:
             start_pos = np.zeros(3)
         distances = row_norm(pos - start_pos)
 
-        # control direction (fallback z)
+        # --- control direction (fallback z) ---
         ctrl_dir = np.asarray(self.npz["control_direction"]).reshape(-1) if "control_direction" in self.npz else np.array([0,0,1.0])
         ctrl_dir = ctrl_dir / (np.linalg.norm(ctrl_dir) + 1e-9)
 
@@ -399,15 +606,25 @@ class PostProcess:
 
         has_rot = rotations.size and ref_rots.size
 
-        # titles
+        # --- deadzone (from npz; accept scalar or array) ---
+        dz_val = None
+        if "deadzone_threshold" in self.npz:
+            dz_raw = np.asarray(self.npz["deadzone_threshold"])
+            try:
+                dz_val = float(dz_raw[0] if dz_raw.ndim > 0 else dz_raw.item() if hasattr(dz_raw, "item") else dz_raw)
+            except Exception:
+                dz_val = None
+            if (dz_val is not None) and (not np.isfinite(dz_val) or dz_val <= 0):
+                dz_val = None  # treat non-positive/NaN as "do not plot"
+
+        # --- titles ---
+        import datetime, os
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ref_force_str = f"{ref_force_mag[0]:.2f}N" if ref_force_mag.size else "N/A"
         initial_target_pose_str = (
             f"[{ref_pos[0,0]:.3f}, {ref_pos[0,1]:.3f}, {ref_pos[0,2]:.3f}]" if ref_pos.size else "[N/A]"
         )
 
-        force_pid = self.npz.get("meta__force_pid_kp", None)
-        pose_pid  = self.npz.get("meta__pose_pid_kp", None)
         def gains_str(base):
             kp = self.npz.get(f"meta__{base}_pid_kp", None)
             ki = self.npz.get(f"meta__{base}_pid_ki", None)
@@ -418,6 +635,7 @@ class PostProcess:
         force_pid_str = gains_str("force")
         pose_pid_str  = gains_str("pose")
 
+        import matplotlib.pyplot as plt
         fig_width = 24 if has_rot else 18
         plt.figure(figsize=(fig_width, 12))
         n_cols = 4 if has_rot else 3
@@ -430,27 +648,35 @@ class PostProcess:
 
         colors = ["red","green","blue"]
 
-        # Row 1
+        # ===== Row 1 =====
+        # Force vs target
         plt.subplot(3, n_cols, 1)
         if forces.size:
-            for a,c in enumerate(colors[:min(3, forces.shape[1])]): plt.plot(T[:forces.shape[0]], forces[:forces.shape[0], a], label=f"{'XYZ'[a]} Force", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, forces.shape[1])]):
+                plt.plot(T[:forces.shape[0]], forces[:forces.shape[0], a], label=f"{'XYZ'[a]} Force", lw=2, color=c)
         if ref_forces.size:
-            for a,c in enumerate(colors[:min(3, ref_forces.shape[1])]): plt.plot(T[:ref_forces.shape[0]], ref_forces[:ref_forces.shape[0], a], "--", label=f"{'XYZ'[a]} Target", lw=2, color=c, alpha=0.7)
+            for a,c in enumerate(colors[:min(3, ref_forces.shape[1])]):
+                plt.plot(T[:ref_forces.shape[0]], ref_forces[:ref_forces.shape[0], a], "--", label=f"{'XYZ'[a]} Target", lw=2, color=c, alpha=0.7)
         plt.title("Force vs Target Force"); plt.xlabel("Time (s)"); plt.ylabel("Force (N)"); plt.legend(); plt.grid(True, alpha=0.3)
 
+        # Position vs target
         plt.subplot(3, n_cols, 2)
         if pos.size:
-            for a,c in enumerate(colors[:min(3, pos.shape[1])]): plt.plot(T[:pos.shape[0]], pos[:pos.shape[0], a], label=f"{'XYZ'[a]} Position", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, pos.shape[1])]):
+                plt.plot(T[:pos.shape[0]], pos[:pos.shape[0], a], label=f"{'XYZ'[a]} Position", lw=2, color=c)
         if ref_pos.size:
-            for a,c in enumerate(colors[:min(3, ref_pos.shape[1])]): plt.plot(T[:ref_pos.shape[0]], ref_pos[:ref_pos.shape[0], a], "--", label=f"{'XYZ'[a]} Target", lw=2, color=c, alpha=0.7)
+            for a,c in enumerate(colors[:min(3, ref_pos.shape[1])]):
+                plt.plot(T[:ref_pos.shape[0]], ref_pos[:ref_pos.shape[0], a], "--", label=f"{'XYZ'[a]} Target", lw=2, color=c, alpha=0.7)
         plt.title("Position vs Target Position"); plt.xlabel("Time (s)"); plt.ylabel("Position (m)"); plt.legend(); plt.grid(True, alpha=0.3)
 
         if has_rot:
             plt.subplot(3, n_cols, 3)
             if rotations.size:
-                for a,c in enumerate(colors[:min(3, rotations.shape[1])]): plt.plot(T[:rotations.shape[0]], rotations[:rotations.shape[0], a], label=f"R{'xyz'[a]} Current", lw=2, color=c)
+                for a,c in enumerate(colors[:min(3, rotations.shape[1])]):
+                    plt.plot(T[:rotations.shape[0]], rotations[:rotations.shape[0], a], label=f"R{'xyz'[a]} Current", lw=2, color=c)
             if ref_rots.size:
-                for a,c in enumerate(colors[:min(3, ref_rots.shape[1])]): plt.plot(T[:ref_rots.shape[0]], ref_rots[:ref_rots.shape[0], a], "--", label=f"R{'xyz'[a]} Target", lw=2, color=c, alpha=0.7)
+                for a,c in enumerate(colors[:min(3, ref_rots.shape[1])]):
+                    plt.plot(T[:ref_rots.shape[0]], ref_rots[:ref_rots.shape[0], a], "--", label=f"R{'xyz'[a]} Target", lw=2, color=c, alpha=0.7)
             plt.title("Rotation vs Target Rotation"); plt.xlabel("Time (s)"); plt.ylabel("Rotation (rad)"); plt.legend(); plt.grid(True, alpha=0.3)
             plt.subplot(3, n_cols, 4)
         else:
@@ -463,23 +689,32 @@ class PostProcess:
                 plt.axhline(y=cap, color="red", ls="--", lw=2, label=f"Distance Cap ({cap}m)")
         plt.title("Movement Distance vs Time"); plt.xlabel("Time (s)"); plt.ylabel("Distance (m)"); plt.legend(); plt.grid(True, alpha=0.3)
 
-        # Row 2
+        # ===== Row 2 =====
+        # Force error
         plt.subplot(3, n_cols, n_cols + 1)
         if f_err.size:
-            for a,c in enumerate(colors[:min(3, f_err.shape[1])]): plt.plot(T[:f_err.shape[0]], f_err[:f_err.shape[0], a], label=f"Force Err {'XYZ'[a]}", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, f_err.shape[1])]):
+                plt.plot(T[:f_err.shape[0]], f_err[:f_err.shape[0], a], label=f"Force Err {'XYZ'[a]}", lw=2, color=c)
             plt.plot(T[:f_err_mag.shape[0]], f_err_mag, "--", label="|Force Err|", lw=2, color="black")
         plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Force Error Vectors"); plt.xlabel("Time (s)"); plt.ylabel("Force Error (N)"); plt.legend(); plt.grid(True, alpha=0.3)
 
+        # Position error (+ optional deadzone lines)
         plt.subplot(3, n_cols, n_cols + 2)
         if p_err.size:
-            for a,c in enumerate(colors[:min(3, p_err.shape[1])]): plt.plot(T[:p_err.shape[0]], p_err[:p_err.shape[0], a], label=f"Pos Err {'XYZ'[a]}", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, p_err.shape[1])]):
+                plt.plot(T[:p_err.shape[0]], p_err[:p_err.shape[0], a], label=f"Pos Err {'XYZ'[a]}", lw=2, color=c)
             plt.plot(T[:p_err_mag.shape[0]], p_err_mag, "--", label="|Pos Err|", lw=2, color="black")
-        plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Position Error Vectors"); plt.xlabel("Time (s)"); plt.ylabel("Position Error (m)"); plt.legend(); plt.grid(True, alpha=0.3)
+        plt.axhline(0, color="black", lw=1, alpha=0.5)
+        if dz_val is not None:
+            plt.axhline(y= dz_val, color="orange", linestyle="dotted", linewidth=2, label=f"Deadzone +{dz_val:.3f} m")
+            plt.axhline(y=-dz_val, color="orange", linestyle="dotted", linewidth=2, label=f"Deadzone -{dz_val:.3f} m")
+        plt.title("3D Position Error Vectors"); plt.xlabel("Time (s)"); plt.ylabel("Position Error (m)"); plt.legend(); plt.grid(True, alpha=0.3)
 
         if has_rot:
             plt.subplot(3, n_cols, n_cols + 3)
             if r_err.size:
-                for a,c in enumerate(colors[:min(3, r_err.shape[1])]): plt.plot(T[:r_err.shape[0]], r_err[:r_err.shape[0], a], label=f"Rot Err R{'xyz'[a]}", lw=2, color=c)
+                for a,c in enumerate(colors[:min(3, r_err.shape[1])]):
+                    plt.plot(T[:r_err.shape[0]], r_err[:r_err.shape[0], a], label=f"Rot Err R{'xyz'[a]}", lw=2, color=c)
                 plt.plot(T[:r_err_mag.shape[0]], r_err_mag, "--", label="|Rot Err|", lw=2, color="black")
             plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Rotation Error Vectors"); plt.xlabel("Time (s)"); plt.ylabel("Rotation Error (rad)"); plt.legend(); plt.grid(True, alpha=0.3)
             plt.subplot(3, n_cols, n_cols + 4)
@@ -490,16 +725,18 @@ class PostProcess:
         plt.plot(T[:pos_err_dir.shape[0]],   pos_err_dir,   label="Position Error in Direction", lw=2, color="darkgreen")
         plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("Errors in Control Direction"); plt.xlabel("Time (s)"); plt.ylabel("Error"); plt.legend(); plt.grid(True, alpha=0.3)
 
-        # Row 3
+        # ===== Row 3 =====
         plt.subplot(3, n_cols, 2*n_cols + 1)
         if f_out.size:
-            for a,c in enumerate(colors[:min(3, f_out.shape[1])]): plt.plot(T[:f_out.shape[0]], f_out[:f_out.shape[0], a], label=f"Force Out {'XYZ'[a]}", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, f_out.shape[1])]):
+                plt.plot(T[:f_out.shape[0]], f_out[:f_out.shape[0], a], label=f"Force Out {'XYZ'[a]}", lw=2, color=c)
             plt.plot(T[:f_out_mag.shape[0]], f_out_mag, "--", label="|Force Out|", lw=2, color="black")
         plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Force Control Outputs"); plt.xlabel("Time (s)"); plt.ylabel("Force Output"); plt.legend(); plt.grid(True, alpha=0.3)
 
         plt.subplot(3, n_cols, 2*n_cols + 2)
         if p_out.size:
-            for a,c in enumerate(colors[:min(3, p_out.shape[1])]): plt.plot(T[:p_out.shape[0]], p_out[:p_out.shape[0], a], label=f"PID Out {'XYZ'[a]}", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, p_out.shape[1])]):
+                plt.plot(T[:p_out.shape[0]], p_out[:p_out.shape[0], a], label=f"PID Out {'XYZ'[a]}", lw=2, color=c)
         if ff_po.size:
             m = min(3, ff_po.shape[1])
             labs = ["FF Out X","FF Out Y","FF Out Z"]
@@ -513,7 +750,8 @@ class PostProcess:
         if has_rot:
             plt.subplot(3, n_cols, 2*n_cols + 3)
             if r_out.size:
-                for a,c in enumerate(colors[:min(3, r_out.shape[1])]): plt.plot(T[:r_out.shape[0]], r_out[:r_out.shape[0], a], label=f"Rot Out R{'xyz'[a]}", lw=2, color=c)
+                for a,c in enumerate(colors[:min(3, r_out.shape[1])]):
+                    plt.plot(T[:r_out.shape[0]], r_out[:r_out.shape[0], a], label=f"Rot Out R{'xyz'[a]}", lw=2, color=c)
                 plt.plot(T[:r_out_mag.shape[0]], r_out_mag, "--", label="|Rot Out|", lw=2, color="black")
             plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Rotation Control Outputs"); plt.xlabel("Time (s)"); plt.ylabel("Rotation Output (rad/s)"); plt.legend(); plt.grid(True, alpha=0.3)
             plt.subplot(3, n_cols, 2*n_cols + 4)
@@ -521,7 +759,8 @@ class PostProcess:
             plt.subplot(3, n_cols, 2*n_cols + 3)
 
         if tot_o.size:
-            for a,c in enumerate(colors[:min(3, tot_o.shape[1])]): plt.plot(T[:tot_o.shape[0]], tot_o[:tot_o.shape[0], a], label=f"Total Out {'XYZ'[a]}", lw=2, color=c)
+            for a,c in enumerate(colors[:min(3, tot_o.shape[1])]):
+                plt.plot(T[:tot_o.shape[0]], tot_o[:tot_o.shape[0], a], label=f"Total Out {'XYZ'[a]}", lw=2, color=c)
             plt.plot(T[:tot_o_mag.shape[0]], tot_o_mag, "--", label="|Total Out|", lw=2, color="purple")
         plt.axhline(0, color="black", lw=1, alpha=0.5); plt.title("3D Total Linear Outputs"); plt.xlabel("Time (s)"); plt.ylabel("Total Output"); plt.legend(); plt.grid(True, alpha=0.3)
 
@@ -530,7 +769,6 @@ class PostProcess:
         os.makedirs("plots", exist_ok=True)
         plot_type = "6dof" if has_rot else "3dof"
         file_path = f"plots/comprehensive_{plot_type}_control_postprocess_{current_datetime}.png"
-        plt.tight_layout(rect=[0,0.03,1,0.95])
         plt.savefig(file_path, dpi=150, bbox_inches="tight")
         plt.close()
         print(f"[SAVED] {file_path}")
@@ -1157,10 +1395,10 @@ class PostProcess:
 
 
 if __name__ == "__main__":
-    post_process = PostProcess("experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_R.npz")
-    post_process = PostProcess("experiments/QP/logs/circle_QP_bw_20251208-131626.npz")
+    post_process = PostProcess("experiments/QP/logs/linear_QP_migros_20251208-162347.npz")
+    #post_process = PostProcess("experiments/QP/logs/linear_QP_bw_20251208-143924.npz")
     #post_process.plot_pid_tracking()
-    # post_process.plot_data3D()
+    #post_process.plot_data3D()
     post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
     # post_process.plot_jointspace("L", title_prefix="DualArmQP_Jointspace_L")
     # post_process.plot_qp_performance(title_prefix="DualArmQP_QP_Performance")
@@ -1168,5 +1406,7 @@ if __name__ == "__main__":
     # post_process.plot_force_profile(title_prefix="DualArmQP_Force_Profile")
     # post_process.plot_box_path_QP(title_prefix="DualArmQP_Box_Meas_vs_Ref")
 
-    post_process.evaluate_PID("experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_R.npz", "experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_L.npz")
-    post_process.evaluate_QP("experiments/QP/logs/circle_QP_bw_20251208-132516.npz")
+    #post_process.evaluate_PID("experiments/PID_ff/logs/linear_PID_ff_bw_20251208-144052_L.npz", "experiments/PID_ff/logs/linear_PID_ff_bw_20251208-144052_R.npz")
+    post_process.evaluate_PID("experiments/PID_ff/logs/linear_PID_ff_bw_20251208-154904_R.npz", "experiments/PID_ff/logs/linear_PID_ff_bw_20251208-154904_L.npz")
+    #post_process.evaluate_QP("experiments/QP/logs/linear_QP_bw_20251208-143924.npz")
+    post_process.evaluate_QP2("experiments/QP/logs/linear_QP_bw_20251208-145913.npz", 5.0, 50)

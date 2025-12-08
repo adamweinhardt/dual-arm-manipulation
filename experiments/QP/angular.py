@@ -12,7 +12,7 @@ if __name__ == "__main__":
     robot_R = URImpedanceController("192.168.1.66", K=K)
 
     # Weights
-    W_imp = diag6([1.0, 1.0, 1.0, 1e3, 1e3, 1e3])
+    W_imp = diag6([1.0, 1.0, 1.0, 3e3, 3e3, 3e3])
     #W_imp = diag6([0,0,0,0,0,0])
     W_grasp = diag6([5e1, 5e1, 5e1, 2e5, 2e5, 2e5])
     #W_grasp = diag6([0, 0, 0, 0, 0, 0])
@@ -22,7 +22,7 @@ if __name__ == "__main__":
     K_a = 400.0
     D_a = 2400.0  # or 2*sqrt(M_a*K_a)
     v_max = 0.05
-    Fn_ref = 25.0
+    Fn_ref = 35.0
 
 
     date = time.strftime("%Y%m%d-%H%M%S")

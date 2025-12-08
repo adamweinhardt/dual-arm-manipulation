@@ -27,8 +27,8 @@ if __name__ == "__main__":
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "QP" # PID, PID_dz, PID_ff, QP
-    box = "bw" # migros, vention
-    traj = "angular"
+    box = "red" # migros, vention
+    traj = "linear"
     traj_path = f"motion_planner/trajectories/{traj}.npz"
     Hz = 50
 
@@ -55,6 +55,8 @@ if __name__ == "__main__":
         robot_L.go_home(); robot_R.go_home()
         robot_L.wait_for_commands(); robot_R.wait_for_commands()
         robot_L.wait_until_done(); robot_R.wait_until_done()
+
+        time.sleep(0.5)
 
         ctrl._init_grasping_data()
         
