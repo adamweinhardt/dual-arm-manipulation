@@ -5,7 +5,7 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 50  # 150
+    reference_force = 30  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.4
+    Kp_p = 0.6
     Ki_p = 0
     Kd_p = 0.05
 
@@ -30,7 +30,7 @@ if __name__ == "__main__":
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
-    box = "bw" # migros, vention
+    box = "red" # migros, vention
     traj = "linear"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 

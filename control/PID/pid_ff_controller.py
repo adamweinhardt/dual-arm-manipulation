@@ -479,11 +479,15 @@ class URForceController(URController):
 
                 # Position
                 position_error_vector = self.reference_position - current_position
+                # feedforward position
+                ff_position_output_vector, ff_pos_p_term, ff_pos_i_term, ff_pos_d_term = (
+                    self.ff_pose_pid.update(position_error_vector)
+                )
                 position_output_vector, pos_p_term, pos_i_term, pos_d_term = (
                     self.pose_pid.update(position_error_vector)
                 )
                 # DEADZONE
-                if self.deadzone_threshold is not None:
+                if self.deadzone_threshold is not None or self.deadzone_threshold !=0:
                     r = float(self.deadzone_threshold)
                     shaped_err = np.zeros(3)
 
@@ -496,11 +500,9 @@ class URForceController(URController):
                             shaped_err[i] = e - r
                         else:
                             shaped_err[i] = e + r
-
-                # feedforward position
-                ff_position_output_vector, ff_pos_p_term, ff_pos_i_term, ff_pos_d_term = (
-                    self.ff_pose_pid.update(position_error_vector)
-                )
+                    position_output_vector = shaped_err
+                else:
+                    position_output_vector = position_output_vector
 
                 total_output_vector = -force_output_vector + position_output_vector + ff_position_output_vector
 

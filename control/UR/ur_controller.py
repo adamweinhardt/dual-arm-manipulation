@@ -66,19 +66,28 @@ class URController(threading.Thread):
 
 
         # Defaults
+        # self.home_joints = [
+        #     -pi / 2.0,
+        #     -pi / 2.0,
+        #     pi / 2.0,
+        #     -pi / 2.0,
+        #     -pi / 2.0,
+        #     pi,
+        # ]
+
         self.home_joints = [
-            -pi / 2.0,
-            -pi / 2.0,
-            pi / 2.0,
-            -pi / 2.0,
-            -pi / 2.0,
-            pi,
+            -1.7570222059832972,
+            -2.4474531612791957,
+            2.201507870350973,
+            -1.374998615389206,
+            -1.5552824179278772,
+            2.9247472286224365,
         ]
         self.ee2marker = np.array(
             [-0.0064, 0.05753, -0.1149, -0.69923, -0.0101, -0.00407, 0.71481]
         )
-        self.default_speed = 1.0
-        self.default_acceleration = 0.5
+        self.default_speed = 0.5
+        self.default_acceleration = 0.25
         self.default_joint_speed = 1.0
         self.default_joint_acceleration = 0.5
 
