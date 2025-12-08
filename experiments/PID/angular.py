@@ -5,7 +5,7 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 50  # 150
+    reference_force = 12.5  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID" # PID, PID_dz, PID_ff, QP
-    box = "bw" # migros, vention
+    box = "red" # migros, vention
     traj = "angular"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 
@@ -95,7 +95,7 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=None,
+            deadzone_threshold=0,
         )
 
         robotL.control_to_target(
@@ -103,7 +103,7 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=None,
+            deadzone_threshold=0,
         )
 
         robotR.wait_for_control()
