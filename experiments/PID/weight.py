@@ -108,7 +108,7 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=deadzone_threshold,
+            deadzone_threshold=None,
         )
 
         robotL.control_to_target(
@@ -116,14 +116,14 @@ if __name__ == "__main__":
             distance_cap=1.5,
             timeout=60,
             trajectory=trajectory,
-            deadzone_threshold=deadzone_threshold,
+            deadzone_threshold=None,
         )
 
         robotR.wait_for_control()
         robotL.wait_for_control()
 
-        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_R_{date}_weigth")
-        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_L_{date}_weigth")
+        robotR.save_everything(f"experiments/PID/logs/{traj}_{version}_{box}_{weigth}_{date}_R")
+        robotL.save_everything(f"experiments/PID/logs/{traj}_{version}_{box}_{weigth}_{date}_L")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

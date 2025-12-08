@@ -31,8 +31,8 @@ if __name__ == "__main__":
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
     box = "bw" # migros, vention
-    traj = "complex"
-    trajectory = f"motion_planner/trajectories/{traj}.npz"
+    traj = "circle"
+    trajectory = f"motion_planner/trajectories_old/{traj}.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -120,8 +120,8 @@ if __name__ == "__main__":
         robotR.wait_for_control()
         robotL.wait_for_control()
 
-        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_R_{date}")
-        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_L_{date}")
+        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_R")
+        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_L")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

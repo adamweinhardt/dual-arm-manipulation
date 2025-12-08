@@ -455,7 +455,7 @@ if __name__ == "__main__":
         "robot_ipc_control/configs/pose_estimation_config_single_camera_dual_arm.json"
     )
 
-    publisher = GraspingPointsPublisher(config_path, approach_offset=0.05)
+    publisher = GraspingPointsPublisher(config_path, approach_offset=0.03)
 
     try:
         publisher.start_publishing()
