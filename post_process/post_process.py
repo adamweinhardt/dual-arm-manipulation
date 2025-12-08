@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import datetime
 import os
+from scipy.spatial.transform import Rotation
 
 class PostProcess:
     """
@@ -15,6 +16,239 @@ class PostProcess:
     def __init__(self, npz_path):
         self.path = npz_path
         self.npz  = np.load(npz_path, allow_pickle=True)
+
+    def evaluate_PID(self, left_npz_path: str, right_npz_path: str):
+        print("\n================ PID TRACKING EVALUATION ================")
+
+        def _evaluate_one(path: str, label: str):
+            data = np.load(path, allow_pickle=True)
+            print(f"\n=========== PID ARM {label} ===========")
+
+            # ----- FORCE -----
+            if "force_vector" in data and "reference_force_vector" in data:
+                A = np.asarray(data["force_vector"], dtype=float)
+                B = np.asarray(data["reference_force_vector"], dtype=float)
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Force] samples      : {n}")
+                    print(f"RMSE Fx,Fy,Fz        : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [N]")
+                    print(f"RMSE ||F - F_ref||   : {rmse_norm:.4f} N")
+            else:
+                print("\n[Force] series not found (measured or reference).")
+
+            # ----- POSITION -----
+            if "position" in data and "reference_position" in data:
+                A = np.asarray(data["position"], dtype=float)
+                B = np.asarray(data["reference_position"], dtype=float)
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Position] samples   : {n}")
+                    print(f"RMSE x,y,z           : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m]")
+                    print(f"RMSE ||p - p_ref||   : {rmse_norm:.4f} m")
+            else:
+                print("\n[Position] series not found (measured or reference).")
+
+            # ----- ROTATION (correct: via relative rotation log-map) -----
+            if "rotation" in data and "reference_rotation" in data:
+                r = np.asarray(data["rotation"], dtype=float)                # rotvec (N,3)
+                r_ref = np.asarray(data["reference_rotation"], dtype=float)  # rotvec (N,3)
+                n = min(len(r), len(r_ref))
+                if n > 0:
+                    r = r[:n]; r_ref = r_ref[:n]
+                    # relative rotation error: R_err = R_ref^T * R_meas
+                    Rm = Rotation.from_rotvec(r)
+                    Rr = Rotation.from_rotvec(r_ref)
+                    e_r = (Rr.inv() * Rm).as_rotvec()     # log-map error (N,3)
+                    # RMSE on components and on angle (norm)
+                    rmse_axes = np.sqrt(np.mean(e_r**2, axis=0))
+                    ang = np.linalg.norm(e_r, axis=1)
+                    rmse_norm = float(np.sqrt(np.mean(ang**2)))  # == angle RMSE
+                    print(f"\n[Rotation] samples   : {n}")
+                    print(f"RMSE rotvec x,y,z    : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad]")
+                    print(f"RMSE ||r - r_ref||   : {rmse_norm:.4f} rad")
+                    print(f"RMSE rotation angle  : {rmse_norm:.4f} rad")
+            else:
+                print("\n[Rotation] series not found (measured or reference).")
+
+            # ----- LINEAR VELOCITY -----
+            if "linear_velocity" in data and "reference_linear_velocity" in data:
+                A = np.asarray(data["linear_velocity"], dtype=float)
+                B = np.asarray(data["reference_linear_velocity"], dtype=float)
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Linear Velocity] samples : {n}")
+                    print(f"RMSE vx,vy,vz        : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m/s]")
+                    print(f"RMSE ||v - v_ref||   : {rmse_norm:.4f} m/s")
+            else:
+                print("\n[Linear Velocity] series not found (measured or reference).")
+
+            # ----- ANGULAR VELOCITY -----
+            if "angular_velocity" in data and "reference_angular_velocity" in data:
+                A = np.asarray(data["angular_velocity"], dtype=float)
+                B = np.asarray(data["reference_angular_velocity"], dtype=float)
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Angular Velocity] samples : {n}")
+                    print(f"RMSE wx,wy,wz        : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad/s]")
+                    print(f"RMSE ||w - w_ref||   : {rmse_norm:.4f} rad/s")
+            else:
+                print("\n[Angular Velocity] series not found (measured or reference).")
+
+            # controller frequency info
+            Hz = data["meta__Hz"] if "meta__Hz" in data else (data["meta__control_rate_hz"] if "meta__control_rate_hz" in data else None)
+            if Hz is not None:
+                print(f"\n[Meta] Logged controller Hz: {float(Hz):.2f}")
+
+        _evaluate_one(left_npz_path,  "LEFT")
+        _evaluate_one(right_npz_path, "RIGHT")
+        print("\n=========================================================\n")
+
+
+    def evaluate_QP(self, qp_path: str):
+        """
+        Evaluate dual-arm QP tracking (force, position, rotation, velocity, angular velocity)
+        from one .npz produced by DualArmImpedanceAdmittanceQP.save_everything().
+
+        Rotation RMSE is computed from the relative rotation log-map:
+            e_r = log(R_ref^T R_meas), with
+            component RMSE on e_r and angle RMSE = RMSE(||e_r||).
+        """
+        print("\n================ QP TRACKING EVALUATION =================")
+
+        try:
+            data = np.load(qp_path, allow_pickle=True)
+        except Exception as e:
+            print(f"Could not load '{qp_path}': {e}")
+            return
+
+        print(f"file: {qp_path}")
+
+        for arm in ("L", "R"):
+            print(f"\n=========== QP ARM {arm} ===========")
+
+            # --- Force ---
+            kF, kFref = f"F_{arm}_vec", f"F_{arm}_ref"
+            if kF in data and kFref in data:
+                A = np.asarray(data[kF], dtype=float)
+                B = np.asarray(data[kFref], dtype=float)
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Force] samples      : {n}")
+                    print(f"RMSE Fx,Fy,Fz        : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [N]")
+                    print(f"RMSE ||F - F_ref||   : {rmse_norm:.4f} N")
+            else:
+                print("\n[Force] missing force logs for this arm.")
+
+            # --- Position ---
+            kp, kpref = f"p_{arm}", f"p_ref_{arm}"
+            if kp in data and kpref in data:
+                A = np.asarray(data[kp], dtype=float)[..., :3]
+                B = np.asarray(data[kpref], dtype=float)[..., :3]
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Position] samples   : {n}")
+                    print(f"RMSE x,y,z           : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m]")
+                    print(f"RMSE ||p - p_ref||   : {rmse_norm:.4f} m")
+            else:
+                print("\n[Position] missing p / p_ref for this arm.")
+
+            # --- Rotation (correct: via relative rotation log-map) ---
+            kr, krref = f"rvec_{arm}", f"rvec_ref_{arm}"
+            if kr in data and krref in data:
+                r = np.asarray(data[kr], dtype=float)
+                r_ref = np.asarray(data[krref], dtype=float)
+                n = min(len(r), len(r_ref))
+                if n > 0:
+                    r = r[:n]; r_ref = r_ref[:n]
+                    Rm = Rotation.from_rotvec(r)
+                    Rr = Rotation.from_rotvec(r_ref)
+                    e_r = (Rr.inv() * Rm).as_rotvec()   # (n,3)
+                    rmse_axes = np.sqrt(np.mean(e_r**2, axis=0))
+                    ang = np.linalg.norm(e_r, axis=1)
+                    rmse_angle = float(np.sqrt(np.mean(ang**2)))  # == norm RMSE
+                    print(f"\n[Rotation] samples   : {n}")
+                    print(f"RMSE rotvec x,y,z    : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad]")
+                    print(f"RMSE ||r - r_ref||   : {rmse_angle:.4f} rad")
+                    print(f"RMSE rotation angle  : {rmse_angle:.4f} rad")
+            else:
+                print("\n[Rotation] missing rvec / rvec_ref for this arm.")
+
+            # --- Linear velocity ---
+            kv, kvref = f"v_{arm}", f"v_ref_{arm}"
+            if kv in data and kvref in data:
+                A = np.asarray(data[kv], dtype=float)[..., :3]
+                B = np.asarray(data[kvref], dtype=float)[..., :3]
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Linear Velocity] samples : {n}")
+                    print(f"RMSE vx,vy,vz         : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [m/s]")
+                    print(f"RMSE ||v - v_ref||    : {rmse_norm:.4f} m/s")
+            else:
+                print("\n[Linear Velocity] missing v / v_ref for this arm.")
+
+            # --- Angular velocity ---
+            kw, kwref = f"w_{arm}", f"w_ref_{arm}"
+            if kw in data and kwref in data:
+                A = np.asarray(data[kw], dtype=float)[..., :3]
+                B = np.asarray(data[kwref], dtype=float)[..., :3]
+                n = min(len(A), len(B))
+                if n > 0:
+                    A = A[:n]; B = B[:n]
+                    if A.ndim == 1: A = A[:, None]
+                    if B.ndim == 1: B = B[:, None]
+                    err = A - B
+                    rmse_axes = np.sqrt(np.mean(err**2, axis=0))
+                    rmse_norm = float(np.sqrt(np.mean(np.linalg.norm(err, axis=1)**2)))
+                    print(f"\n[Angular Velocity] samples: {n}")
+                    print(f"RMSE wx,wy,wz         : [{rmse_axes[0]:.4f}, {rmse_axes[1]:.4f}, {rmse_axes[2]:.4f}]  [rad/s]")
+                    print(f"RMSE ||w - w_ref||    : {rmse_norm:.4f} rad/s")
+            else:
+                print("\n[Angular Velocity] missing w / w_ref for this arm.")
+
+        print("\n=========================================================\n")
+
 
     def plot_PID(self):
         # pull what we need, skip if missing
@@ -301,6 +535,136 @@ class PostProcess:
         plt.close()
         print(f"[SAVED] {file_path}")
 
+    def plot_pid_tracking(self, title_prefix="PID_Taskspace"):
+        import os, datetime
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        data = self.npz
+
+        # time
+        if "timestamp" not in data:
+            print("[plot_pid_tracking] No 'timestamp' in npz.")
+            return
+        t = np.asarray(data["timestamp"]).reshape(-1)
+
+        def _get(name):
+            return np.asarray(data[name]) if name in data else None
+
+        p      = _get("position")
+        p_ref  = _get("reference_position")
+        r_v    = _get("rotation")                 # rotvec
+        r_vref = _get("reference_rotation")
+
+        v      = _get("linear_velocity")
+        v_ref  = _get("reference_linear_velocity")
+        w      = _get("angular_velocity")
+        w_ref  = _get("reference_angular_velocity")
+
+        colors = ["r", "g", "b"]
+        comp   = ["X", "Y", "Z"]
+
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10), sharex=True)
+
+        # --- 1) Position vs ref ---
+        ax = axes[0, 0]
+        if p is not None:
+            n = min(len(t), len(p))
+            for i_c in range(min(3, p.shape[1])):
+                ax.plot(t[:n], p[:n, i_c], color=colors[i_c], label=f"p{comp[i_c]}")
+        if p_ref is not None:
+            n = min(len(t), len(p_ref))
+            for i_c in range(min(3, p_ref.shape[1])):
+                ax.plot(t[:n], p_ref[:n, i_c], "--", color=colors[i_c], alpha=0.7, label=f"p{comp[i_c]} ref")
+        ax.set_ylabel("Position [m]")
+        ax.set_title("Position vs Reference")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, ncol=3)
+
+        # --- 2) Rotation (rotvec) vs ref ---
+        ax = axes[0, 1]
+        if r_v is not None:
+            n = min(len(t), len(r_v))
+            for i_c in range(min(3, r_v.shape[1])):
+                ax.plot(t[:n], r_v[:n, i_c], color=colors[i_c], label=f"r{comp[i_c]}")
+        if r_vref is not None:
+            n = min(len(t), len(r_vref))
+            for i_c in range(min(3, r_vref.shape[1])):
+                ax.plot(t[:n], r_vref[:n, i_c], "--", color=colors[i_c], alpha=0.7, label=f"r{comp[i_c]} ref")
+        ax.set_ylabel("Rot. Vector [rad]")
+        ax.set_title("Rotation (rotvec) vs Reference")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, ncol=3)
+
+        # --- 3) Position error norm ---
+        ax = axes[0, 2]
+        if p is not None and p_ref is not None:
+            n = min(len(p), len(p_ref), len(t))
+            e_p = p[:n] - p_ref[:n]
+            err_norm = np.linalg.norm(e_p, axis=1)
+            ax.plot(t[:n], err_norm, label="‖p - p_ref‖")
+        ax.set_ylabel("Error [m]")
+        ax.set_title("Position Error Norm")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+        # --- 4) Linear velocity vs ref ---
+        ax = axes[1, 0]
+        if v is not None:
+            n = min(len(t), len(v))
+            for i_c in range(min(3, v.shape[1])):
+                ax.plot(t[:n], v[:n, i_c], color=colors[i_c], label=f"v{comp[i_c]}")
+        if v_ref is not None:
+            n = min(len(t), len(v_ref))
+            for i_c in range(min(3, v_ref.shape[1])):
+                ax.plot(t[:n], v_ref[:n, i_c], "--", color=colors[i_c], alpha=0.7, label=f"v{comp[i_c]} ref")
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Lin. Vel. [m/s]")
+        ax.set_title("Linear Velocity vs Reference")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, ncol=3)
+
+        # --- 5) Angular velocity vs ref ---
+        ax = axes[1, 1]
+        if w is not None:
+            n = min(len(t), len(w))
+            for i_c in range(min(3, w.shape[1])):
+                ax.plot(t[:n], w[:n, i_c], color=colors[i_c], label=f"ω{comp[i_c]}")
+        if w_ref is not None:
+            n = min(len(t), len(w_ref))
+            for i_c in range(min(3, w_ref.shape[1])):
+                ax.plot(t[:n], w_ref[:n, i_c], "--", color=colors[i_c], alpha=0.7, label=f"ω{comp[i_c]} ref")
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Ang. Vel. [rad/s]")
+        ax.set_title("Angular Velocity vs Reference")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, ncol=3)
+
+        # --- 6) Rotation error angle ---
+        ax = axes[1, 2]
+        if r_v is not None and r_vref is not None:
+            n = min(len(r_v), len(r_vref), len(t))
+            Rm     = Rotation.from_rotvec(r_v[:n])
+            Rm_ref = Rotation.from_rotvec(r_vref[:n])
+            R_rel  = Rm_ref.inv() * Rm
+            ang_err = R_rel.magnitude()
+            ax.plot(t[:n], ang_err, label="rotation angle error")
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Angle [rad]")
+        ax.set_title("Rotation Error Angle")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+        now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        plt.suptitle(f"{title_prefix} (viewed {now})", fontsize=14, y=0.98)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        os.makedirs("plots", exist_ok=True)
+        fname = f"plots/{title_prefix.lower()}_{now}.png"
+        plt.savefig(fname, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"[plot_pid_tracking] Saved {fname}")
+
     def plot_box_path_PID(self):
         # --- load measured box pose ---
         if "box_positions" not in self.npz or "box_rotmats" not in self.npz:
@@ -344,8 +708,7 @@ class PostProcess:
         # --- rotmat → roll/pitch/yaw ---
         def rot_to_rpy(Rstack):
             try:
-                from scipy.spatial.transform import Rotation as R
-                return R.from_matrix(Rstack).as_euler('xyz', degrees=True)
+                return Rotation.from_matrix(Rstack).as_euler('xyz', degrees=True)
             except Exception:
                 eul = np.zeros((len(Rstack),3))
                 r11, r21, r31 = Rstack[:,0,0], Rstack[:,1,0], Rstack[:,2,0]
@@ -749,8 +1112,7 @@ class PostProcess:
         # rot → rpy
         def rot_to_rpy(Rstack):
             try:
-                from scipy.spatial.transform import Rotation as R
-                return R.from_matrix(Rstack).as_euler('xyz', degrees=True)
+                return Rotation.from_matrix(Rstack).as_euler('xyz', degrees=True)
             except Exception:
                 eul = np.zeros((len(Rstack),3))
                 r11, r21, r31 = Rstack[:,0,0], Rstack[:,1,0], Rstack[:,2,0]
@@ -793,12 +1155,18 @@ class PostProcess:
         plt.savefig(fname, dpi=150, bbox_inches="tight")
         plt.close(); print(f"[SAVED] {fname}")
 
+
 if __name__ == "__main__":
-    post_process = PostProcess("experiments/PID_ff/logs/angular_PID_ff_bw_L_20251205-182816.npz")
-    post_process.plot_data3D()
-    # post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
+    post_process = PostProcess("experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_R.npz")
+    post_process = PostProcess("experiments/QP/logs/circle_QP_bw_20251208-131626.npz")
+    #post_process.plot_pid_tracking()
+    # post_process.plot_data3D()
+    post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
     # post_process.plot_jointspace("L", title_prefix="DualArmQP_Jointspace_L")
     # post_process.plot_qp_performance(title_prefix="DualArmQP_QP_Performance")
     # post_process.plot_qp_objective(title_prefix="DualArmQP_QP_Objective")
     # post_process.plot_force_profile(title_prefix="DualArmQP_Force_Profile")
     # post_process.plot_box_path_QP(title_prefix="DualArmQP_Box_Meas_vs_Ref")
+
+    post_process.evaluate_PID("experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_R.npz", "experiments/PID_ff/logs/circle_PID_ff_bw_20251208-130532_L.npz")
+    post_process.evaluate_QP("experiments/QP/logs/circle_QP_bw_20251208-132516.npz")

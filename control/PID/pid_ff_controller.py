@@ -292,6 +292,8 @@ class URForceController(URController):
         self.reference_rotation_matrix = _assert_rotmat(
             "my ref_R (init)", R.from_rotvec(self.reference_rotation).as_matrix()
         )
+        self.reference_linear_velocity = np.array([0,0,0], dtype=float)
+        self.reference_angular_velocity = np.array([0,0,0], dtype=float)
 
         self.ref_force = float(reference_force)
         self.control_direction = -np.array(normal, dtype=float) / (
@@ -310,8 +312,8 @@ class URForceController(URController):
                 print("Flipped for robot 0")
                 self.rot_updates = flip_y_component_in_rotations(self.rot_updates)
                 self.rot_updates = flip_x_component_in_rotations(self.rot_updates)
-            self.traj_linear_velocity = traj_npz.get("linear_velocity", None)
-            self.traj_angular_velocity = traj_npz.get("angular_velocity", None)
+            self.reference_linear_velocity_updates = traj_npz.get("linear_velocity", None)
+            self.reference_angular_velocity_updates = traj_npz.get("angular_velocity", None)
             self._traj_len = len(self.rot_updates)
 
             if (
@@ -374,6 +376,8 @@ class URForceController(URController):
                 current_position = np.array(state["gripper_world"][:3])
                 current_rotation = np.array(state["pose"][3:6])  # rotvec
                 current_rotation_matrix = R.from_rotvec(current_rotation).as_matrix()
+                current_linear_velocity = np.array(state["speed_world"])[:3]
+                current_angular_velocity = np.array(state["speed_world"])[3:6]
 
                 # ========================= Safety ===========================
                 distance_moved = np.linalg.norm(current_position - self.start_position)
@@ -408,6 +412,9 @@ class URForceController(URController):
                     R_B0B = _assert_rotmat(
                         "R_B0B(my traj)", self.rot_updates[trajectory_index]
                     )
+
+                    self.reference_linear_velocity = self.reference_linear_velocity_updates[trajectory_index]
+                    self.reference_angular_velocity = self.reference_angular_velocity_updates[trajectory_index]
 
                     if self.robot_id == 0:
                         offset = [-0.055, 0, 0]
@@ -520,8 +527,12 @@ class URForceController(URController):
                         "force_vector": current_force_vector,
                         "position": current_position,
                         "rotation": current_rotation,
+                        "linear_velocity": current_linear_velocity,
+                        "angular_velocity": current_angular_velocity,
                         "reference_position": self.reference_position.copy(),
                         "reference_rotation": self.reference_rotation.copy(),
+                        "reference_linear_velocity": self.reference_linear_velocity.copy(),      # from trajectory
+                        "reference_angular_velocity": self.reference_angular_velocity.copy(),
                         "reference_force_vector": ref_force_vector,
                         "position_error_vector": position_error_vector,
                         "rotation_error_vector": rotation_error_vector,
@@ -1418,15 +1429,22 @@ class URForceController(URController):
 
             priority = [
                 "timestamp",
-                "force_vector","position","rotation",
-                "reference_force_vector","reference_position","reference_rotation",
-                "force_error_vector","position_error_vector","rotation_error_vector",
-                "force_output_vector","position_output_vector","ff_position_output_vector",
-                "total_output_vector","rotation_output_vector",
-                "force_p_term","force_i_term","force_d_term",
-                "pos_p_term","pos_i_term","pos_d_term",
-                "ff_pos_p_term","ff_pos_i_term","ff_pos_d_term",
-                "rot_p_term","rot_i_term","rot_d_term",
+                # measured
+                "force_vector", "position", "rotation",
+                "linear_velocity", "angular_velocity",
+                # references
+                "reference_force_vector", "reference_position", "reference_rotation",
+                "reference_linear_velocity", "reference_angular_velocity",
+                # errors
+                "force_error_vector", "position_error_vector", "rotation_error_vector",
+                # outputs
+                "force_output_vector", "position_output_vector", "ff_position_output_vector",
+                "total_output_vector", "rotation_output_vector",
+                # PID terms
+                "force_p_term", "force_i_term", "force_d_term",
+                "pos_p_term", "pos_i_term", "pos_d_term",
+                "ff_pos_p_term", "ff_pos_i_term", "ff_pos_d_term",
+                "rot_p_term", "rot_i_term", "rot_d_term",
             ]
 
             ordered_keys = [k for k in priority if k in common_keys] + \
@@ -1437,7 +1455,7 @@ class URForceController(URController):
                     arr = np.array([d[k] for d in cd])
                     if k != "timestamp" and arr.ndim == 1:
                         arr = np.expand_dims(arr, -1)
-                    stacked[f"{k}"] = arr
+                    stacked[k] = arr
                 except Exception:
                     pass
 
@@ -1447,15 +1465,19 @@ class URForceController(URController):
             for tpl in self.box_data:
                 if tpl is None or len(tpl) < 2 or tpl[0] is None or tpl[1] is None:
                     box_positions.append(np.array([np.nan, np.nan, np.nan]))
-                    box_rotmats.append(np.full((3,3), np.nan))
+                    box_rotmats.append(np.full((3, 3), np.nan))
                 else:
                     bp, br = tpl
                     box_positions.append(np.array(bp).reshape(3,))
-                    br_arr = np.array(br).reshape(3,3) if np.array(br).size == 9 else np.full((3,3), np.nan)
+                    br_arr = np.array(br)
+                    if br_arr.size == 9:
+                        br_arr = br_arr.reshape(3, 3)
+                    else:
+                        br_arr = np.full((3, 3), np.nan)
                     box_rotmats.append(br_arr)
 
-        box_positions = np.vstack(box_positions) if box_positions else np.zeros((0,3))
-        box_rotmats = np.stack(box_rotmats) if box_rotmats else np.zeros((0,3,3))
+        box_positions = np.vstack(box_positions) if box_positions else np.zeros((0, 3))
+        box_rotmats   = np.stack(box_rotmats)    if box_rotmats   else np.zeros((0, 3, 3))
 
         # ---------- frame and reference info ----------
         R_WB0 = getattr(self, "_R_WB0", None)
@@ -1479,7 +1501,8 @@ class URForceController(URController):
             ("force_pid", getattr(self, "force_pid", None)),
             ("pose_pid", getattr(self, "pose_pid", None)),
             ("rot_pid", getattr(self, "rot_pid", None)),
-            ("ff_pose_pid", getattr(self, "ff_pose_pid", None))]:
+            ("ff_pose_pid", getattr(self, "ff_pose_pid", None))
+        ]:
             if obj is not None:
                 try:
                     meta[f"{label}_kp"] = np.array(obj.kp)
@@ -1488,7 +1511,7 @@ class URForceController(URController):
                 except Exception:
                     pass
 
-        for n in ["kp_f","ki_f","kd_f"]:
+        for n in ["kp_f", "ki_f", "kd_f"]:
             if hasattr(self, n):
                 meta[n] = float(getattr(self, n))
 
@@ -1506,7 +1529,7 @@ class URForceController(URController):
         meta["start_time_epoch"] = float(getattr(self, "start_time", np.nan))
         meta["robot_id"] = getattr(self, "robot_id", -1)
 
-        for name in ["start_position","start_rotation","grasping_point","other_robot_grasp_point"]:
+        for name in ["start_position", "start_rotation", "grasping_point", "other_robot_grasp_point"]:
             if hasattr(self, name) and getattr(self, name) is not None:
                 meta[name] = np.array(getattr(self, name), dtype=float)
 
@@ -1515,7 +1538,7 @@ class URForceController(URController):
         try:
             if os.path.isdir("plots"):
                 for fn in os.listdir("plots"):
-                    if fn.lower().endswith((".png",".jpg",".jpeg",".pdf")):
+                    if fn.lower().endswith((".png", ".jpg", ".jpeg", ".pdf")):
                         plot_paths.append(os.path.join("plots", fn))
         except Exception:
             pass
@@ -1531,13 +1554,15 @@ class URForceController(URController):
         if ref_rot is not None:  pack["ref_rotation_last"] = np.array(ref_rot)
         if ref_Rmat is not None: pack["ref_rotation_matrix_last"] = np.array(ref_Rmat)
 
-        # ⭐ NEW: save velocities
+        # last ref velocities snapshot
         if ref_vel is not None:   pack["ref_linear_velocity_last"] = np.array(ref_vel)
         if ref_omega is not None: pack["ref_angular_velocity_last"] = np.array(ref_omega)
 
         if ref_force is not None:
-            try: pack["ref_force"] = np.array(ref_force)
-            except: pack["ref_force"] = np.array([float(ref_force)])
+            try:
+                pack["ref_force"] = np.array(ref_force)
+            except Exception:
+                pack["ref_force"] = np.array([float(ref_force)])
 
         if ctrl_dir is not None:
             pack["control_direction"] = np.array(ctrl_dir)
@@ -1550,18 +1575,22 @@ class URForceController(URController):
 
         # meta fields
         for k, v in meta.items():
-            pack[f"meta__{k}"] = v if isinstance(v, (float,int,np.floating)) else np.array(v)
+            pack[f"meta__{k}"] = v if isinstance(v, (float, int, np.floating)) else np.array(v)
 
         pack["plot_paths"] = plot_paths_arr
 
         # ---------- optional trajectory references ----------
         if hasattr(self, "rot_updates") and self.rot_updates is not None:
-            try: pack["traj_rotation_matrices"] = np.array(self.rot_updates)
-            except: pass
+            try:
+                pack["traj_rotation_matrices"] = np.array(self.rot_updates)
+            except Exception:
+                pass
 
         if hasattr(self, "pose_updates_stream") and self.pose_updates_stream is not None:
-            try: pack["traj_position_offsets"] = np.array(self.pose_updates_stream)
-            except: pass
+            try:
+                pack["traj_position_offsets"] = np.array(self.pose_updates_stream)
+            except Exception:
+                pass
 
         # ---------- derived box reference poses ----------
         try:
@@ -1569,7 +1598,7 @@ class URForceController(URController):
                 hasattr(self, "_p_WB0") and self._p_WB0 is not None and
                 hasattr(self, "rot_updates") and self.rot_updates is not None):
 
-                R_WB0 = np.array(self._R_WB0).reshape(3,3)
+                R_WB0 = np.array(self._R_WB0).reshape(3, 3)
                 p_WB0 = np.array(self._p_WB0).reshape(3,)
 
                 rot_updates = np.array(self.rot_updates)
@@ -1578,8 +1607,8 @@ class URForceController(URController):
                     pos_off = np.array(self.pose_updates_stream)
 
                 K = len(rot_updates)
-                box_ref_rotmats = np.zeros((K,3,3))
-                box_ref_positions = np.zeros((K,3))
+                box_ref_rotmats   = np.zeros((K, 3, 3))
+                box_ref_positions = np.zeros((K, 3))
 
                 for i in range(K):
                     R_B0B = rot_updates[i]
@@ -1589,7 +1618,7 @@ class URForceController(URController):
                     dp = pos_off[i] if (pos_off is not None and i < len(pos_off)) else np.zeros(3)
                     box_ref_positions[i] = p_WB0 + (R_WB0 @ dp)
 
-                pack["box_ref_rotmats"] = box_ref_rotmats
+                pack["box_ref_rotmats"]   = box_ref_rotmats
                 pack["box_ref_positions"] = box_ref_positions
         except Exception:
             pass
@@ -1597,3 +1626,4 @@ class URForceController(URController):
         np.savez_compressed(out_path, **pack)
         print(f"[SAVED] {out_path}")
         return out_path
+

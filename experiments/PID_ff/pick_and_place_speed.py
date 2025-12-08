@@ -132,8 +132,8 @@ if __name__ == "__main__":
         robotR.wait_for_control()
         robotL.wait_for_control()
 
-        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_R_{date}")
-        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_L_{date}")
+        robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_R")
+        robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_L")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")

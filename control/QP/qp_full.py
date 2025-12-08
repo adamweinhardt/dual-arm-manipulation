@@ -250,8 +250,8 @@ class DualArmImpedanceAdmittanceQP:
             self.w_ref_L[t] = w_box[t]
 
             # Right (mirrored)
-            self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
-            self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
+            self.p_ref_R[t] = p0_R + p_box[t] * [-1, -1, 1]
+            self.v_ref_R[t] = v_box[t] * [-1, -1, 1]
             self.R_ref_R[t] = R_rel @ R0_R
             self.w_ref_R[t] = w_box[t]
 
@@ -324,7 +324,7 @@ class DualArmImpedanceAdmittanceQP:
         ]
         
         self.qp = cp.Problem(cp.Minimize(obj), cons)
-        self.qp_kwargs = dict(eps_abs=1e-6, eps_rel=1e-6, alpha=1.6, max_iter=10000,
+        self.qp_kwargs = dict(eps_abs=1e-5, eps_rel=1e-5, alpha=1.6, max_iter=5000,
                               adaptive_rho=True, adaptive_rho_interval=20, polish=True,
                               check_termination=10, warm_start=True)
 
