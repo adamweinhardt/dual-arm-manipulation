@@ -6,7 +6,8 @@ import time
 
 
 if __name__ == "__main__":
-    K = np.diag([10, 10, 10, 0.2, 0.2, 0.2])
+    K = np.diag([20, 20, 20, 0.2, 0.2, 0.2])
+
     
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
@@ -22,13 +23,14 @@ if __name__ == "__main__":
     K_a = 400.0
     D_a = 2400.0  # or 2*sqrt(M_a*K_a)
     v_max = 0.05
-    Fn_ref = 25.0
+    Fn_ref = 45
 
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "QP" # PID, PID_dz, PID_ff, QP
     box = "vention" # migros, vention
     traj = "pick_and_place_0.5v_0.25a_0.5w_0.25B"
+    weigth = "2.4kg"
     traj_path = f"motion_planner/trajectories/{traj}.npz"
     Hz = 50
 
@@ -66,7 +68,7 @@ if __name__ == "__main__":
         # run controller
         ctrl.run()
 
-        ctrl.save_everything(f"experiments/QP/logs/{traj}_{version}_{box}_{date}")
+        ctrl.save_everything(f"experiments/QP/logs/{traj}_{version}_{box}_{weigth}_{date}")
 
     except KeyboardInterrupt:
         print("Interrupted")
