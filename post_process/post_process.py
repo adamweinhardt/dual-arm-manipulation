@@ -1395,11 +1395,11 @@ class PostProcess:
 
 
 if __name__ == "__main__":
-    #post_process = PostProcess("experiments/QP/logs/angular_QP_bw_20251209-104314.npz")
-    post_process = PostProcess("experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_R.npz")
+    post_process = PostProcess("experiments/QP/logs/pick_and_place_0.5v_0.25a_0.5w_0.25B_QP_vention_4.4kg_20251209-162847.npz")
+    #post_process = PostProcess("experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_R.npz")
     #post_process.plot_pid_tracking()
-    post_process.plot_data3D()
-    #post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
+    #post_process.plot_data3D()
+    post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
     # post_process.plot_jointspace("L", title_prefix="DualArmQP_Jointspace_L")
     # post_process.plot_qp_performance(title_prefix="DualArmQP_QP_Performance")
     # post_process.plot_qp_objective(title_prefix="DualArmQP_QP_Objective")
@@ -1407,6 +1407,6 @@ if __name__ == "__main__":
     # post_process.plot_box_path_QP(title_prefix="DualArmQP_Box_Meas_vs_Ref")
 
     #post_process.evaluate_PID("experiments/PID_ff/logs/linear_PID_ff_bw_20251208-144052_L.npz", "experiments/PID_ff/logs/linear_PID_ff_bw_20251208-144052_R.npz")
-    post_process.evaluate_PID("experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_R.npz", "experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_L.npz")
+    #post_process.evaluate_PID("experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_R.npz", "experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_L.npz")
     #post_process.evaluate_QP("experiments/QP/logs/linear_QP_bw_20251208-143924.npz")
-    post_process.evaluate_QP2("experiments/QP/logs/angular_QP_bw_20251209-104314.npz", 5.0, 50)
+    #post_process.evaluate_QP2("experiments/QP/logs/angular_QP_bw_20251209-104314.npz", 5.0, 50)

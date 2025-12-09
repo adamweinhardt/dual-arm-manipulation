@@ -5,11 +5,11 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 50  # 150
+    reference_force = 65  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0065 * factor
+    kp_f = 0.005 * factor
     ki_f = 0.0001 * factor
     kd_f = 0.001 * factor
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.4
+    Kp_p = 0.1
     Ki_p = 0
     Kd_p = 0.05
 
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
     box = "vention" # migros, vention
     traj = "pick_and_place_0.5v_0.25a_0.5w_0.25B"
-    weigth = "0.2kg"
+    weigth = "2.4kg"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
