@@ -55,10 +55,12 @@ if __name__ == "__main__":
     hz = 100
     dt = 1 / hz
 
-    max_lin_vel = 0.5  # m/s
-    max_lin_acc = 0.25  # m/s²
-    max_ang_vel = 0.5 #rad/s
-    max_ang_acc = 0.25 #rad/s²
+    factor = 2
+
+    max_lin_vel = 0.5 *factor  # m/s
+    max_lin_acc = 0.25 *factor # m/s²
+    max_ang_vel = 0.5 *factor#rad/s
+    max_ang_acc = 0.25 *factor#rad/s²
 
 
     up = planner.linear(pose1, pose2, dt, max_lin_vel = max_lin_vel, max_lin_acc = max_lin_acc, max_ang_vel = max_ang_vel,max_ang_acc = max_ang_acc)

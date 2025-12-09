@@ -9,7 +9,7 @@ if __name__ == "__main__":
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0065 * factor
+    kp_f = 0.0055 * factor
     ki_f = 0.0001 * factor
     kd_f = 0.001 * factor
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.4
+    Kp_p = 0.15
     Ki_p = 0
     Kd_p = 0.05
 
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
     box = "bw" # migros, vention
-    traj = "pick_and_place_0.5v_0.25a_0.5w_0.25B"
+    traj = "pick_and_place_0.750v_0.375a_0.75w_0.375B"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
@@ -71,18 +71,6 @@ if __name__ == "__main__":
     robotR.alpha = alpha
 
     try:
-        robotL.moveJ(
-            [
-                -0.9861305395709437,
-                -1.0489304226687928,
-                2.1829379240619105,
-                -2.6813165150084437,
-                -1.598926846181051,
-                3.818711757659912,
-            ]
-        )
-
-        robotL.wait_for_commands()
         robotL.moveJ(
             [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
         )
