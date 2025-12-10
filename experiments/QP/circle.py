@@ -6,7 +6,7 @@ import time
 
 
 if __name__ == "__main__":
-    K = np.diag([15, 15, 15, 0.2, 0.2, 0.2])
+    K = np.diag([20, 20, 20, 0.3, 0.3, 0.3])
     
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
@@ -22,14 +22,14 @@ if __name__ == "__main__":
     K_a = 400.0
     D_a = 2400.0  # or 2*sqrt(M_a*K_a)
     v_max = 0.05
-    Fn_ref = 40
+    Fn_ref = 70
 
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "QP" # PID, PID_dz, PID_ff, QP
     box = "bw" # migros, vention
-    traj = "circle"
-    traj_path = f"motion_planner/trajectories_old/{traj}.npz"
+    traj = "rollercoaster_circle"
+    traj_path = f"motion_planner/trajectories/{traj}.npz"
     Hz = 50
 
     ctrl = DualArmImpedanceAdmittanceQP(
@@ -65,6 +65,7 @@ if __name__ == "__main__":
 
         # run controller
         ctrl.run()
+        ctrl.plot_taskspace("L")
 
         ctrl.save_everything(f"experiments/QP/logs/{traj}_{version}_{box}_{date}")
 

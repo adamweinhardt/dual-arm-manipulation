@@ -6,13 +6,13 @@ import time
 
 
 if __name__ == "__main__":
-    K = np.diag([22, 22, 22, 0.2, 0.2, 0.2])
+    K = np.diag([22, 22, 22, 0.4, 0.4, 0.4])
     
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
 
     # Weights
-    W_imp = diag6([1.0, 1.0, 1.0, 1e3, 1e3, 1e3])
+    W_imp = diag6([1.0, 1.0, 1.0, 1e4, 1e4, 1e4])
     #W_imp = diag6([0,0,0,0,0,0])
     W_grasp = diag6([6e1, 6e1, 6e1, 2e5, 2e5, 2e5])
     #W_grasp = diag6([0, 0, 0, 0, 0, 0])

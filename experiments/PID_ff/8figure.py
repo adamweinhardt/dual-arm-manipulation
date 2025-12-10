@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.4
+    Kp_p = 0.25
     Ki_p = 0
     Kd_p = 0.05
 
@@ -31,8 +31,8 @@ if __name__ == "__main__":
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
     box = "bw" # migros, vention
-    traj = "circle"
-    trajectory = f"motion_planner/trajectories_old/{traj}.npz"
+    traj = "figure8_complex"
+    trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
         "192.168.1.33",
@@ -119,6 +119,8 @@ if __name__ == "__main__":
 
         robotR.wait_for_control()
         robotL.wait_for_control()
+
+        robotL.plot_data3D()
 
         robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_R")
         robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_L")

@@ -5,7 +5,7 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 12.5  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 

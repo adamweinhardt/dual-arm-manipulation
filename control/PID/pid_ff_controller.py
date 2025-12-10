@@ -357,9 +357,9 @@ class URForceController(URController):
         while self.control_active and not self.control_stop.is_set():
             loop_start = time.perf_counter()
             try:
-                if trajectory_index >= self._traj_len:
-                    print("Trajectory completed.")
-                    break
+                # if trajectory_index >= self._traj_len:
+                #     print("Trajectory completed.")
+                #     break
                 self.box_data.append(self.get_box_data())
                 if not trajectory_started:
                         reference_force = 50 # 150
