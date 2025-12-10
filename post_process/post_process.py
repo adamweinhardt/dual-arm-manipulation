@@ -1395,11 +1395,12 @@ class PostProcess:
 
 
 if __name__ == "__main__":
-    post_process = PostProcess("experiments/QP/logs/pick_and_place_0.5v_0.25a_0.5w_0.25B_QP_vention_4.4kg_20251209-162847.npz")
-    #post_process = PostProcess("experiments/PID_ff/logs/angular/angular_PID_ff_bw_20251208-184626_R.npz")
+    #post_process = PostProcess("experiments/QP/logs/pick_and_place_0.5v_0.25a_0.5w_0.25B_QP_vention_4.4kg_20251209-162847.npz")
+    post_process = PostProcess("experiments/PID_ff/logs/complex/seq_figure8_complex_PID_ff_bw_20251210-150257_L.npz")
+    print(post_process.npz)
     #post_process.plot_pid_tracking()
-    #post_process.plot_data3D()
-    post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
+    post_process.plot_data3D()
+    #post_process.plot_taskspace("L", title_prefix="DualArmQP_Taskspace_L")
     # post_process.plot_jointspace("L", title_prefix="DualArmQP_Jointspace_L")
     # post_process.plot_qp_performance(title_prefix="DualArmQP_QP_Performance")
     # post_process.plot_qp_objective(title_prefix="DualArmQP_QP_Objective")

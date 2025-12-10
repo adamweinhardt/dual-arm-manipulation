@@ -5,11 +5,11 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 25  # 150
+    reference_force = 50  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0065 * factor
+    kp_f = 0.0058 * factor
     ki_f = 0.0001 * factor
     kd_f = 0.001 * factor
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.6
+    Kp_p = 0.15
     Ki_p = 0
     Kd_p = 0.05
 
@@ -30,8 +30,8 @@ if __name__ == "__main__":
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
-    box = "red" # migros, vention
-    traj = "linear"
+    box = "bw" # migros, vention
+    traj = "rollercoaster_circle"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
@@ -75,6 +75,8 @@ if __name__ == "__main__":
             [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
         )
 
+        robotL.wait_for_commands()
+
         robotR.go_home()
         robotL.go_home()
 
@@ -117,6 +119,7 @@ if __name__ == "__main__":
 
         robotR.wait_for_control()
         robotL.wait_for_control()
+        robotL.plot_data3D()
 
         robotR.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_R")
         robotL.save_everything(f"experiments/PID_ff/logs/{traj}_{version}_{box}_{date}_L")

@@ -30,7 +30,7 @@ if __name__ == "__main__":
     )
 
     # --- Add 30° rotation about z for the transport & place ---
-    theta = np.deg2rad(45.0)
+    theta = np.deg2rad(0)
     c, s = np.cos(theta), np.sin(theta)
     pose3 = np.array(
         [
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     hz = 100
     dt = 1 / hz
 
-    factor = 2
+    factor = 0.8
 
     max_lin_vel = 0.5 *factor  # m/s
     max_lin_acc = 0.25 *factor # m/s²
@@ -88,5 +88,5 @@ if __name__ == "__main__":
 
     # Save trajectory bundle
     full_trajectory.save_trajectory(
-        f"motion_planner/trajectories/pick_and_place_{max_lin_vel}v_{max_lin_acc}a_{max_ang_vel}w_{max_ang_acc}B.npz"
+        f"motion_planner/trajectories/pick_and_place_{max_lin_vel}v_{max_lin_acc}a_{max_ang_vel}w_{max_ang_acc}B_{hz}Hz_weight.npz"
     )

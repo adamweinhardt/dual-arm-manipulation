@@ -5,11 +5,11 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 65  # 150
+    reference_force = 100 # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.005 * factor
+    kp_f = 0.006 * factor
     ki_f = 0.0001 * factor
     kd_f = 0.001 * factor
 
@@ -31,8 +31,8 @@ if __name__ == "__main__":
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "PID_ff" # PID, PID_dz, PID_ff, QP
     box = "vention" # migros, vention
-    traj = "pick_and_place_0.5v_0.25a_0.5w_0.25B"
-    weigth = "2.4kg"
+    traj = "pick_and_place_0.4v_0.2a_0.4w_0.2B_100Hz_weight"
+    weigth = "10kg"
     trajectory = f"motion_planner/trajectories/{traj}.npz"
 
     robotL = URForceController(
@@ -73,18 +73,6 @@ if __name__ == "__main__":
 
     try:
         robotL.moveJ(
-            [
-                -0.9861305395709437,
-                -1.0489304226687928,
-                2.1829379240619105,
-                -2.6813165150084437,
-                -1.598926846181051,
-                3.818711757659912,
-            ]
-        )
-
-        robotL.wait_for_commands()
-        robotL.moveJ(
             [-2.72771532, -1.40769446, 2.81887228, -3.01955523, -1.6224683, 2.31350756]
         )
 
@@ -117,7 +105,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60,
+            timeout=20,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -125,7 +113,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60,
+            timeout=20,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )

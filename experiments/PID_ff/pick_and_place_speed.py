@@ -5,11 +5,11 @@ import time
 
 if __name__ == "__main__":
     hz = 100
-    reference_force = 50  # 150
+    reference_force = 60  # 150
     base_force = 12.5
     factor = base_force / reference_force
 
-    kp_f = 0.0055 * factor
+    kp_f = 0.0058 * factor
     ki_f = 0.0001 * factor
     kd_f = 0.001 * factor
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ki_r = 0
     kd_r = 0.1
 
-    Kp_p = 0.15
+    Kp_p = 0.2
     Ki_p = 0
     Kd_p = 0.05
 
@@ -104,7 +104,7 @@ if __name__ == "__main__":
         robotR.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60,
+            timeout=16,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         robotL.control_to_target(
             reference_force=reference_force,
             distance_cap=1.5,
-            timeout=60,
+            timeout=16,
             trajectory=trajectory,
             deadzone_threshold=deadzone_threshold,
         )

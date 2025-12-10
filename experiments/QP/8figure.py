@@ -6,8 +6,7 @@ import time
 
 
 if __name__ == "__main__":
-    K = np.diag([15, 15, 15, 0.2, 0.2, 0.2])
-
+    K = np.diag([20, 20, 20, 0.2, 0.2, 0.2])
     
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
@@ -15,22 +14,21 @@ if __name__ == "__main__":
     # Weights
     W_imp = diag6([1.0, 1.0, 1.0, 1e3, 1e3, 1e3])
     #W_imp = diag6([0,0,0,0,0,0])
-    W_grasp = diag6([6e1, 6e1, 6e1, 2e5, 2e5, 2e5])
+    W_grasp = diag6([5e1, 5e1, 5e1, 2e5, 2e5, 2e5])
     #W_grasp = diag6([0, 0, 0, 0, 0, 0])
     lambda_reg = 1e-6
 
-    M_a = 30.0
-    K_a = 525.0
-    D_a = 2800.0  # or 2*sqrt(M_a*K_a)
-    v_max = 0.075
-    Fn_ref = 92
+    M_a = 27.0
+    K_a = 400.0
+    D_a = 2400.0  # or 2*sqrt(M_a*K_a)
+    v_max = 0.1
+    Fn_ref = 65
 
 
     date = time.strftime("%Y%m%d-%H%M%S")
     version = "QP" # PID, PID_dz, PID_ff, QP
-    box = "vention" # migros, vention
-    traj = "pick_and_place_0.4v_0.2a_0.4w_0.2B_100Hz_weight"
-    weigth = "10kg"
+    box = "bw" # migros, vention
+    traj = "figure8_complex_50"
     traj_path = f"motion_planner/trajectories/{traj}.npz"
     Hz = 50
 
@@ -68,7 +66,9 @@ if __name__ == "__main__":
         # run controller
         ctrl.run()
 
-        ctrl.save_everything(f"experiments/QP/logs/{traj}_{version}_{box}_{weigth}_{date}")
+        ctrl.plot_taskspace("L")
+
+        ctrl.save_everything(f"experiments/QP/logs/{traj}_{version}_{box}_{date}")
 
     except KeyboardInterrupt:
         print("Interrupted")
