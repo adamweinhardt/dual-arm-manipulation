@@ -3,3 +3,4 @@ venv
 .vscode
 plots/*
 z.log.global
+**/logs/
