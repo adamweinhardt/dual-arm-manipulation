@@ -4,10 +4,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 import pinocchio as pin
 
-# -------------------------------------------------
-# Basic SE(3) helpers
-# -------------------------------------------------
-
 
 def make_T(Rm: np.ndarray, t: np.ndarray) -> np.ndarray:
     """Build a homogeneous transform T from rotation Rm (3x3) and translation t (3,)."""
@@ -31,11 +27,6 @@ def invert_T(T: np.ndarray) -> np.ndarray:
     return Tinv
 
 
-# -------------------------------------------------
-# Rotation conversions
-# -------------------------------------------------
-
-
 def rvec_to_rotmat(rvec: np.ndarray) -> np.ndarray:
     """Rodrigues rotation vector (3,) -> rotation matrix (3x3)."""
     return R.from_rotvec(np.asarray(rvec, dtype=float)).as_matrix()
@@ -44,11 +35,6 @@ def rvec_to_rotmat(rvec: np.ndarray) -> np.ndarray:
 def rotmat_to_rvec(rotmat: np.ndarray) -> np.ndarray:
     """Rotation matrix (3x3) -> Rodrigues rotation vector (3,)."""
     return R.from_matrix(np.asarray(rotmat, dtype=float)).as_rotvec()
-
-
-# -------------------------------------------------
-# Pose <-> Transform
-# -------------------------------------------------
 
 
 def pose6_to_T(pose6: np.ndarray) -> np.ndarray:
@@ -65,11 +51,6 @@ def T_to_pose6(T: np.ndarray) -> np.ndarray:
     Rm, t = decompose_T(T)
     rvec = rotmat_to_rvec(Rm)
     return np.array([t[0], t[1], t[2], rvec[0], rvec[1], rvec[2]], dtype=float)
-
-
-# -------------------------------------------------
-# Transformations of different quantities
-# -------------------------------------------------
 
 
 def transform_point(T_a2b: np.ndarray, p_a: np.ndarray) -> np.ndarray:
@@ -123,11 +104,6 @@ def transform_wrench(T_a2b: np.ndarray, wrench_a: np.ndarray) -> np.ndarray:
     return np.concatenate([f_b, m_b])
 
 
-# -------------------------------------------------
-# Utility
-# -------------------------------------------------
-
-
 def wrap_angles(angle: np.ndarray) -> np.ndarray:
     """Wrap angles to [-π, π]."""
     angle = np.asarray(angle, dtype=float)
@@ -163,34 +139,28 @@ def end_effector_rotation_from_normal(normal_vector, eps=1e-9):
     n_norm = np.linalg.norm(n)
     if n_norm < eps:
         raise ValueError("normal_vector has near-zero magnitude")
-    y = n / n_norm  # y -> into surface
+    y = n / n_norm
 
     g_down = np.array([0.0, 0.0, -1.0])  # global down
 
-    # Project global down onto plane orthogonal to y (best-possible 'down' given y)
     z = g_down - np.dot(g_down, y) * y
     z_norm = np.linalg.norm(z)
     if z_norm < eps:
-        # y is (anti)parallel to global down; pick a horizontal fallback
-        # choose x-axis as fallback, then re-project
         fallback = np.array([1.0, 0.0, 0.0])
         z = fallback - np.dot(fallback, y) * y
         z_norm = np.linalg.norm(z)
         if z_norm < eps:
-            # extremely degenerate: pick y-orthogonal basis directly
-            # choose any vector not collinear with y
             fallback = np.array([0.0, 1.0, 0.0])
             z = fallback - np.dot(fallback, y) * y
             z_norm = np.linalg.norm(z)
     z = z / z_norm
 
-    x = np.cross(y, z)  # right-handed (z = x × y => x = y × z)
+    x = np.cross(y, z)
     x_norm = np.linalg.norm(x)
     if x_norm < eps:
         raise ValueError("Failed to construct orthonormal basis")
     x = x / x_norm
 
-    # Re-orthogonalize z to kill any numerical drift and ensure z = x × y
     z = np.cross(x, y)
 
     R = np.column_stack([x, y, z])
@@ -205,18 +175,17 @@ def end_effector_rotation_from_normal(normal_vector, eps=1e-9):
 
 def _canonicalize_pair(pA, pB):
     d = pB - pA
-    axis = int(np.argmax(np.abs(d)))  # 0=x, 1=y, 2=z (dominant separation)
-    if d[axis] < 0:  # enforce positive along dominant axis
+    axis = int(np.argmax(np.abs(d)))
+    if d[axis] < 0:
         pA, pB = pB, pA
     return pA, pB
 
+
 def _compute_initial_box_frame(pA, pB):
-    # --- canonicalize ordering so both arms build the SAME frame ---
     pA, pB = _canonicalize_pair(pA, pB)
 
     x_hat = (pB - pA) / (np.linalg.norm(pB - pA) + 1e-9)
 
-    # project world-z onto plane orthogonal to x_hat; fallback if degenerate
     z_guess = np.array([0, 0, 1])
     z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
     if np.linalg.norm(z_hat) < 1e-6:
@@ -225,17 +194,18 @@ def _compute_initial_box_frame(pA, pB):
     z_hat /= np.linalg.norm(z_hat) + 1e-9
 
     y_hat = np.cross(z_hat, x_hat)
-    y_hat /= np.linalg.norm(y_hat) + 1e-9  # (tiny numeric guard)
+    y_hat /= np.linalg.norm(y_hat) + 1e-9
 
     R_WB0 = np.column_stack([x_hat, y_hat, z_hat])
     p_WB0 = 0.5 * (pA + pB)
     return R_WB0, p_WB0
 
+
 def _freeze_sparsity(A, eps=1e-12):
-    # Replace exact zeros with a tiny epsilon to keep nnz pattern constant.
     A = np.asarray(A, dtype=float).copy()
     A[A == 0.0] = eps
     return A
+
 
 def _as_rowvec_1d(x, name, length=None):
     a = np.asarray(x, dtype=float).squeeze()
@@ -244,6 +214,7 @@ def _as_rowvec_1d(x, name, length=None):
     if length is not None and a.shape[0] != length:
         raise ValueError(f"{name} length {a.shape[0]} != {length}")
     return a
+
 
 def _as_2d(x, name, shape0=None, shape1=None):
     a = np.asarray(x, dtype=float).squeeze()
@@ -255,6 +226,7 @@ def _as_2d(x, name, shape0=None, shape1=None):
         raise ValueError(f"{name} shape[1] {a.shape[1]} != {shape1}")
     return a
 
+
 def diag6(vals):
     a = np.asarray(vals, dtype=float).reshape(-1)
     if a.size == 1:
@@ -265,8 +237,10 @@ def diag6(vals):
         return np.diag(a)
     raise ValueError("diag6 expects 1, 3, or 6 values")
 
+
 def is_finite(*arrays):
     return all(np.all(np.isfinite(np.asarray(x))) for x in arrays)
+
 
 def short_arc_log(R_ref, R_cur):
     q_ref = R.from_matrix(R_ref).as_quat()

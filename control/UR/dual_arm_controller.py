@@ -53,7 +53,7 @@ class DualArmController:
         self.right.wait_for_commands()
         self.left.wait_until_done()
         self.right.wait_until_done()
-        time.sleep(0.1)  # Brief pause to ensure states are updated
+        time.sleep(0.1)
 
     def get_states(self):
         """Get states of both arms"""
@@ -69,7 +69,7 @@ class DualArmController:
         subscriber = context.socket(zmq.SUB)
         subscriber.connect(f"tcp://localhost:{grasping_port}")
         subscriber.setsockopt_string(zmq.SUBSCRIBE, "")
-        subscriber.setsockopt(zmq.CONFLATE, 1)  # Keep only latest message
+        subscriber.setsockopt(zmq.CONFLATE, 1)
 
         try:
             print("Waiting for grasping points...")
@@ -98,17 +98,14 @@ class DualArmController:
             print(f"Confidence: {grasp_info['confidence']:.2f}")
             print(f"Robot assignment: {grasp_info['robot_assignment']}")
 
-            # Extract points and create poses
-            point1 = grasp_info["point1"]  # [x, y, z]
-            point2 = grasp_info["point2"]  # [x, y, z]
+            point1 = grasp_info["point1"]
+            point2 = grasp_info["point2"]
             robot_assignment = grasp_info["robot_assignment"]
 
-            # Convert to poses (add default orientation)
-            default_orientation = [0, 3.14, 0]  # [rx, ry, rz]
+            default_orientation = [0, 3.14, 0]
             pose1 = point1 + default_orientation
             pose2 = point2 + default_orientation
 
-            # Assign poses to robots (fix string keys)
             if robot_assignment["0"] == "face1":
                 left_pose, right_pose = pose1, pose2
                 print(f"Left robot → Point1: {point1}")
@@ -118,7 +115,6 @@ class DualArmController:
                 print(f"Left robot → Point2: {point2}")
                 print(f"Right robot → Point1: {point1}")
 
-            # Execute coordinated movement
             print("\nExecuting coordinated grasp...")
             self.move_L(left_pose, right_pose)
             self.wait_for_all()

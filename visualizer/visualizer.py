@@ -4,10 +4,6 @@ import json
 import numpy as np
 
 import robotic as ry
-
-from robot_ipc_control.pose_estimation.transform_utils import (
-    rotation_matrix_to_quaternion,
-)
 from robot_ipc_control.pose_estimation.board_pose_estimator import BoardPoseEstimator
 from robot_ipc_control.pose_estimation.scene_utils import make_scene, get_robot_joints
 from robot_ipc_control.examples.robot_interface import urtde_to_rai
@@ -19,15 +15,12 @@ class Visualizer:
         with open(config_path, "r") as f:
             self.scene_config = json.load(f)
 
-        # create scene
         self.C, self.box_names, self.robot_names = make_scene(self.scene_config)
 
-        # get robot joint names
         self.robot_joint_names = {}
         for robot_name in self.robot_names:
             self.robot_joint_names[robot_name] = get_robot_joints(self.C, robot_name)
 
-        # ZMQ setup for robots
         self.robot_context = zmq.Context()
         self.robot_sockets = {}
 
@@ -40,12 +33,10 @@ class Visualizer:
             socket.connect(f"tcp://127.0.0.1:{port}")
             self.robot_sockets[f"robot_{i}"] = socket
 
-        # box tracking
         box_port = self.scene_config.get("port", 5557)
         self.box_estimator = BoardPoseEstimator(f"tcp://localhost:{box_port}")
         self.box_estimator.start()
 
-        # grasping points subscription
         self.grasping_context = zmq.Context()
         self.grasping_socket = self.grasping_context.socket(zmq.SUB)
         self.grasping_socket.setsockopt(zmq.CONFLATE, 1)
@@ -199,7 +190,7 @@ class Visualizer:
                 self.update_boxes()
                 self.update_grasping_points()
                 self.C.view(False)
-                time.sleep(0.05)  # 20Hz
+                time.sleep(0.05)
 
         except KeyboardInterrupt:
             pass

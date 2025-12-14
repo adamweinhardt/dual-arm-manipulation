@@ -12,7 +12,6 @@ from scipy.spatial.transform import Rotation as RR
 import matplotlib.pyplot as plt
 from numpy.linalg import solve, eigh
 
-# project deps
 from control.PID.pid_ff_controller import URForceController
 from utils.utils import _freeze_sparsity, _as_rowvec_1d, short_arc_log, diag6
 
@@ -40,25 +39,35 @@ class URImpedanceController(URForceController):
         return np.array(Jdot_flat, dtype=float).reshape((6, 6))
 
     def get_M_ur(self, q):
-        M_flat = self.rtde_control.getMassMatrix(q.tolist(), include_rotors_inertia=True)
+        M_flat = self.rtde_control.getMassMatrix(
+            q.tolist(), include_rotors_inertia=True
+        )
         M = np.array(M_flat, dtype=float).reshape((6, 6))
         return 0.5 * (M + M.T)
-    
+
     def get_J(self, q):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
-        J = pin.getFrameJacobian(self.pin_model, self.pin_data, self.pin_frame_id,
-                                 pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+        J = pin.getFrameJacobian(
+            self.pin_model,
+            self.pin_data,
+            self.pin_frame_id,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )
         return self.get_J_pin(J)
 
     def get_Jdot(self, q, v):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
         pin.computeJointJacobiansTimeVariation(self.pin_model, self.pin_data, q, v)
-        dJ = pin.getFrameJacobianTimeVariation(self.pin_model, self.pin_data, self.pin_frame_id,
-                                               pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+        dJ = pin.getFrameJacobianTimeVariation(
+            self.pin_model,
+            self.pin_data,
+            self.pin_frame_id,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )
         return self.get_J_pin(dJ)
-    
+
     def get_M(self, q):
         M = pin.crba(self.pin_model, self.pin_data, q)
         return np.asarray(0.5 * (M + M.T))
@@ -71,7 +80,7 @@ class URImpedanceController(URForceController):
         lam_max = float(np.max(eigvals))
         floor = max(abs_reg, rel_reg * lam_max)
         eigvals_reg = np.maximum(eigvals, floor)
-        
+
         Lambda_inv = (Q * eigvals_reg) @ Q.T
         Lambda_inv = 0.5 * (Lambda_inv + Lambda_inv.T)
 
@@ -79,7 +88,7 @@ class URImpedanceController(URForceController):
         Lambda = (Q * inv_eigs) @ Q.T
         Lambda = 0.5 * (Lambda + Lambda.T)
         return Lambda, Lambda_inv
-    
+
     def get_D(self, K, Lambda):
         K = 0.5 * (K + K.T)
         L = 0.5 * (Lambda + Lambda.T)
@@ -96,11 +105,12 @@ class URImpedanceController(URForceController):
         D = S_L @ S_K + S_K @ S_L
         D = 0.5 * (D + D.T)
         return D
-    
+
     def wrench_desired(self, K, D, e_p, e_r, e_v, e_w):
         X_err = np.hstack((e_p, e_r))
         Xd_err = np.hstack((e_v, e_w))
         return D @ Xd_err + K @ X_err
+
 
 class DualArmImpedanceAdmittanceQP:
     def __init__(
@@ -117,41 +127,51 @@ class DualArmImpedanceAdmittanceQP:
         ref_force: float = 15.0,
         k_p: float = 3e-4,
         k_d: float = 1e-4,
-        v_max: float = 0.02
+        v_max: float = 0.02,
     ):
         self.robotL = robot_L
         self.robotR = robot_R
         self.Hz = int(Hz)
         self.dt = 1.0 / float(self.Hz)
 
-        # Admittance Parameters
         self.ref_force = float(ref_force)
         self.k_p = float(k_p)
         self.k_d = float(k_d)
         self.v_max = float(v_max)
-        
-        self.box_dimensions = np.linalg.norm(self.robotL.get_grasping_data()[0] - self.robotR.get_grasping_data()[0])
+
+        self.box_dimensions = np.linalg.norm(
+            self.robotL.get_grasping_data()[0] - self.robotR.get_grasping_data()[0]
+        )
 
         self._npz_path = trajectory_npz_path
         self.data = np.load(self._npz_path)
         self.traj_len = int(self.data["position"].shape[0])
 
-        # Limits
-        self.joint_pose_limit  = np.deg2rad(360.0)
+        self.joint_pose_limit = np.deg2rad(360.0)
         self.joint_speed_limit = np.deg2rad(180.0)
         self.joint_accel_limit = np.deg2rad(120.0)
 
-        # QP Weights
-        self.W_imp_L = np.asarray(W_imp_L, dtype=float) if W_imp_L is not None else np.eye(6)
-        self.W_imp_R = np.asarray(W_imp_R, dtype=float) if W_imp_R is not None else np.eye(6)
-        self.W_grasp_L_np = np.asarray(W_grasp_L, dtype=float) if W_grasp_L is not None else np.zeros((6,6))
-        self.W_grasp_R_np = np.asarray(W_grasp_R, dtype=float) if W_grasp_R is not None else np.zeros((6,6))
+        self.W_imp_L = (
+            np.asarray(W_imp_L, dtype=float) if W_imp_L is not None else np.eye(6)
+        )
+        self.W_imp_R = (
+            np.asarray(W_imp_R, dtype=float) if W_imp_R is not None else np.eye(6)
+        )
+        self.W_grasp_L_np = (
+            np.asarray(W_grasp_L, dtype=float)
+            if W_grasp_L is not None
+            else np.zeros((6, 6))
+        )
+        self.W_grasp_R_np = (
+            np.asarray(W_grasp_R, dtype=float)
+            if W_grasp_R is not None
+            else np.zeros((6, 6))
+        )
         self.lambda_reg = float(lambda_reg)
 
         self.control_data = []
         self._should_stop = threading.Event()
-        
-        # Perf metrics
+
         self.log_every_s = 1.0
         self._ctrl_start_wall = None
         self._last_log_wall = None
@@ -166,30 +186,37 @@ class DualArmImpedanceAdmittanceQP:
         self.build_qp(self.dt)
 
     def _init_grasping_data(self):
-        self.grasping_point_L_world, _, self.normal_L_world = self.robotL.get_grasping_data()
-        self.grasping_point_L_base = self.robotL.world_point_2_robot(self.grasping_point_L_world)
+        self.grasping_point_L_world, _, self.normal_L_world = (
+            self.robotL.get_grasping_data()
+        )
+        self.grasping_point_L_base = self.robotL.world_point_2_robot(
+            self.grasping_point_L_world
+        )
         self.normal_L_base = self.robotL.world_vector_2_robot(self.normal_L_world)
-        self.grasping_point_R_world, _, self.normal_R_world = self.robotR.get_grasping_data()
-        self.grasping_point_R_base = self.robotR.world_point_2_robot(self.grasping_point_R_world)
+        self.grasping_point_R_world, _, self.normal_R_world = (
+            self.robotR.get_grasping_data()
+        )
+        self.grasping_point_R_base = self.robotR.world_point_2_robot(
+            self.grasping_point_R_world
+        )
         self.normal_R_base = self.robotR.world_vector_2_robot(self.normal_R_world)
 
+    def _load_refs(
+        self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R
+    ):
+        p_box = self.data["position"]  # (T,3) displacement of box center from t=0
+        v_box = self.data["linear_velocity"]  # (T,3)
+        R_box = self.data["rotation_matrices"]  # (T,3,3) absolute; R_box[0] is initial
+        w_box = self.data["angular_velocity"]  # (T,3)
 
-    def _load_refs(self, grasping_point_L, grasping_point_R, grasping_R_L, grasping_R_R):
-        p_box = self.data["position"]            # (T,3) displacement of box center from t=0
-        v_box = self.data["linear_velocity"]     # (T,3)
-        R_box = self.data["rotation_matrices"]   # (T,3,3) absolute; R_box[0] is initial
-        w_box = self.data["angular_velocity"]    # (T,3)
-
-        # LEFT init
         p0_L, R0_L = grasping_point_L, grasping_R_L
         self.p_ref_L, self.v_ref_L = np.zeros_like(p_box), np.zeros_like(v_box)
         self.R_ref_L, self.w_ref_L = np.zeros_like(R_box), np.zeros_like(w_box)
 
-        # Right
         p0_R, R0_R = grasping_point_R, grasping_R_R
         self.p_ref_R, self.v_ref_R = np.zeros_like(p_box), np.zeros_like(v_box)
         self.R_ref_R, self.w_ref_R = np.zeros_like(R_box), np.zeros_like(w_box)
-        
+
         R_box0 = R_box[0]
         for t in range(self.traj_len):
             # Left
@@ -201,7 +228,7 @@ class DualArmImpedanceAdmittanceQP:
             self.p_ref_R[t] = p0_R + p_box[t] * [-1, 1, 1]
             self.v_ref_R[t] = v_box[t] * [-1, 1, 1]
             self.R_ref_R[t] = (R_box[t] @ R_box0.T) @ R0_R
-            self.w_ref_R[t] = w_box[t] 
+            self.w_ref_R[t] = w_box[t]
 
             # self.p_ref_L[t] += R_box[t] @ (self.normal_L_base * (self.box_dimensions / 2.0))
             # self.p_ref_R[t] += R_box[t] @ (self.normal_R_base * (self.box_dimensions / 2.0))
@@ -211,76 +238,88 @@ class DualArmImpedanceAdmittanceQP:
         self.qddot_L = cp.Variable(n, name="qddot_L")
         self.qddot_R = cp.Variable(n, name="qddot_R")
 
-        # --- Parameters ---
         self.J_L_p = cp.Parameter((6, n), name="J_L")
         self.J_dot_L_p = cp.Parameter((6, n), name="J_dot_L")
         self.q_L_p = cp.Parameter(n, name="q_L")
         self.qdot_L_p = cp.Parameter(n, name="qdot_L")
-        
-        # Targets
-        self.a_des_L_p = cp.Parameter(6, name="a_des_L")        # Impedance Target (Accel)
-        self.xdot_star_L = cp.Parameter(6, name="xdot_star_L")  # Admittance Target (Vel)
-        
+
+        self.a_des_L_p = cp.Parameter(6, name="a_des_L")
+        self.xdot_star_L = cp.Parameter(6, name="xdot_star_L")
+
         self.J_R_p = cp.Parameter((6, n), name="J_R")
         self.J_dot_R_p = cp.Parameter((6, n), name="J_dot_R")
         self.q_R_p = cp.Parameter(n, name="q_R")
         self.qdot_R_p = cp.Parameter(n, name="qdot_R")
-        
+
         self.a_des_R_p = cp.Parameter(6, name="a_des_R")
         self.xdot_star_R = cp.Parameter(6, name="xdot_star_R")
 
-        # Weights
         self.W_imp_L_p = cp.Parameter((6, 6), name="W_imp_L")
         self.W_grasp_L_p = cp.Parameter((6, 6), name="W_grasp_L")
         self.W_imp_R_p = cp.Parameter((6, 6), name="W_imp_R")
         self.W_grasp_R_p = cp.Parameter((6, 6), name="W_grasp_R")
 
-        dt_c  = cp.Constant(float(dt))
+        dt_c = cp.Constant(float(dt))
         dt2_c = cp.Constant(float(0.5 * dt * dt))
 
-        # --- Constraints (Lookahead) ---
-        q_next_L     = self.q_L_p + self.qdot_L_p * dt_c + self.qddot_L * dt2_c
+        q_next_L = self.q_L_p + self.qdot_L_p * dt_c + self.qddot_L * dt2_c
         q_dot_next_L = self.qdot_L_p + self.qddot_L * dt_c
-        
-        q_next_R     = self.q_R_p + self.qdot_R_p * dt_c + self.qddot_R * dt2_c
+
+        q_next_R = self.q_R_p + self.qdot_R_p * dt_c + self.qddot_R * dt2_c
         q_dot_next_R = self.qdot_R_p + self.qddot_R * dt_c
 
-        # --- Objectives ---
-        # 1. Impedance: Match Desired Acceleration (J*qddot + Jdot*qdot ~ a_des)
-        e_imp_L = self.J_L_p @ self.qddot_L + self.J_dot_L_p @ self.qdot_L_p - self.a_des_L_p
-        
-        # 2. Admittance: Match Desired Twist (J*qdot_next ~ xdot_star)
+        e_imp_L = (
+            self.J_L_p @ self.qddot_L + self.J_dot_L_p @ self.qdot_L_p - self.a_des_L_p
+        )
+
         x_dot_next_L = self.J_L_p @ q_dot_next_L
-        e_grasp_L    = x_dot_next_L - self.xdot_star_L
+        e_grasp_L = x_dot_next_L - self.xdot_star_L
 
-        # Right Arm
-        e_imp_R      = self.J_R_p @ self.qddot_R + self.J_dot_R_p @ self.qdot_R_p - self.a_des_R_p
+        e_imp_R = (
+            self.J_R_p @ self.qddot_R + self.J_dot_R_p @ self.qdot_R_p - self.a_des_R_p
+        )
         x_dot_next_R = self.J_R_p @ q_dot_next_R
-        e_grasp_R    = x_dot_next_R - self.xdot_star_R
+        e_grasp_R = x_dot_next_R - self.xdot_star_R
 
-        # Combined Cost
-        obj_L = cp.sum_squares(self.W_imp_L_p @ e_imp_L) + cp.sum_squares(self.W_grasp_L_p @ e_grasp_L)
-        obj_R = cp.sum_squares(self.W_imp_R_p @ e_imp_R) + cp.sum_squares(self.W_grasp_R_p @ e_grasp_R)
-        reg   = self.lambda_reg * (cp.sum_squares(self.qddot_L) + cp.sum_squares(self.qddot_R))
-        
+        obj_L = cp.sum_squares(self.W_imp_L_p @ e_imp_L) + cp.sum_squares(
+            self.W_grasp_L_p @ e_grasp_L
+        )
+        obj_R = cp.sum_squares(self.W_imp_R_p @ e_imp_R) + cp.sum_squares(
+            self.W_grasp_R_p @ e_grasp_R
+        )
+        reg = self.lambda_reg * (
+            cp.sum_squares(self.qddot_L) + cp.sum_squares(self.qddot_R)
+        )
+
         obj = obj_L + obj_R + reg
 
-
-
         cons = [
-            -self.joint_pose_limit <= q_next_L,     q_next_L     <= self.joint_pose_limit,
-            -self.joint_pose_limit <= q_next_R,     q_next_R     <= self.joint_pose_limit,
-            -self.joint_speed_limit <= q_dot_next_L, q_dot_next_L <= self.joint_speed_limit,
-            -self.joint_speed_limit <= q_dot_next_R, q_dot_next_R <= self.joint_speed_limit,
-            -self.joint_accel_limit <= self.qddot_L, self.qddot_L <= self.joint_accel_limit,
-            -self.joint_accel_limit <= self.qddot_R, self.qddot_R <= self.joint_accel_limit,
+            -self.joint_pose_limit <= q_next_L,
+            q_next_L <= self.joint_pose_limit,
+            -self.joint_pose_limit <= q_next_R,
+            q_next_R <= self.joint_pose_limit,
+            -self.joint_speed_limit <= q_dot_next_L,
+            q_dot_next_L <= self.joint_speed_limit,
+            -self.joint_speed_limit <= q_dot_next_R,
+            q_dot_next_R <= self.joint_speed_limit,
+            -self.joint_accel_limit <= self.qddot_L,
+            self.qddot_L <= self.joint_accel_limit,
+            -self.joint_accel_limit <= self.qddot_R,
+            self.qddot_R <= self.joint_accel_limit,
         ]
-        
+
         self.qp = cp.Problem(cp.Minimize(obj), cons)
-        self.qp_kwargs = dict(eps_abs=1e-6, eps_rel=1e-6, alpha=1.6, max_iter=10000,
-                              adaptive_rho=True, adaptive_rho_interval=20, polish=True,
-                              check_termination=10, warm_start=True)
-        
+        self.qp_kwargs = dict(
+            eps_abs=1e-6,
+            eps_rel=1e-6,
+            alpha=1.6,
+            max_iter=10000,
+            adaptive_rho=True,
+            adaptive_rho_interval=20,
+            polish=True,
+            check_termination=10,
+            warm_start=True,
+        )
 
     def run(self):
         time.sleep(0.1)
@@ -290,13 +329,11 @@ class DualArmImpedanceAdmittanceQP:
         t_idx = 0
         traj_initialized = False
 
-        # Init derivatives
         self.e_P_L_prev = np.zeros(3)
         self.e_P_R_prev = np.zeros(3)
 
         self._init_grasping_data()
 
-        # Init start positions for traj interp
         start_p_L = self.robotL.get_state()["gripper_base"][:3]
         start_p_R = self.robotR.get_state()["gripper_base"][:3]
         grasping_R_L = RR.from_rotvec(self.robotL.get_state()["pose"][3:6]).as_matrix()
@@ -304,7 +341,7 @@ class DualArmImpedanceAdmittanceQP:
 
         self._ctrl_start_wall = time.perf_counter()
         self._last_log_wall = time.perf_counter()
-        
+
         while not self.control_stop.is_set():
             loop_start = time.perf_counter()
             elapsed = loop_start - self._ctrl_start_wall
@@ -312,9 +349,11 @@ class DualArmImpedanceAdmittanceQP:
                 if t_idx >= self.traj_len:
                     print("Trajectory completed.")
                     break
-                # --- state LEFT ---
                 state_L = self.robotL.get_state()
-                p_L, v_L = np.array(state_L["gripper_base"][:3]), np.array(state_L["speed"][:3])
+                p_L, v_L = (
+                    np.array(state_L["gripper_base"][:3]),
+                    np.array(state_L["speed"][:3]),
+                )
                 R_L = RR.from_rotvec(state_L["pose"][3:6]).as_matrix()
                 w_L = np.array(state_L["speed"][3:6])
                 q_L, qdot_L = self.robotL.get_q(), self.robotL.get_qdot()
@@ -323,9 +362,11 @@ class DualArmImpedanceAdmittanceQP:
                 J_L = self.robotL.get_J(q_L)
                 J_dot_L = self.robotL.get_Jdot(q_L, qdot_L)
 
-                # --- state RIGHT ---
                 state_R = self.robotR.get_state()
-                p_R, v_R = np.array(state_R["gripper_base"][:3]), np.array(state_R["speed"][:3])
+                p_R, v_R = (
+                    np.array(state_R["gripper_base"][:3]),
+                    np.array(state_R["speed"][:3]),
+                )
                 R_R = RR.from_rotvec(state_R["pose"][3:6]).as_matrix()
                 w_R = np.array(state_R["speed"][3:6])
                 q_R, qdot_R = self.robotR.get_q(), self.robotR.get_qdot()
@@ -338,59 +379,68 @@ class DualArmImpedanceAdmittanceQP:
                 # 1. IMPEDANCE (Trajectory Tracking)
                 # ==========================================================
                 t_model_start = time.perf_counter()
-                
+
                 if elapsed < 3.0:
                     alpha = elapsed / 3.0
-                    p_ref_L = start_p_L + alpha * (self.grasping_point_L_base - start_p_L)
+                    p_ref_L = start_p_L + alpha * (
+                        self.grasping_point_L_base - start_p_L
+                    )
                     R_ref_L = grasping_R_L
                     v_ref_L, w_ref_L = np.zeros(3), np.zeros(3)
-                    
-                    p_ref_R = start_p_R + alpha * (self.grasping_point_R_base - start_p_R)
+
+                    p_ref_R = start_p_R + alpha * (
+                        self.grasping_point_R_base - start_p_R
+                    )
                     R_ref_R = grasping_R_R
                     v_ref_R, w_ref_R = np.zeros(3), np.zeros(3)
 
-                    #print("Start:", start_p_L, "Goal:", self.grasping_point_L_base, "Ref:", p_ref_L)
+                    # print("Start:", start_p_L, "Goal:", self.grasping_point_L_base, "Ref:", p_ref_L)
                 else:
                     if not traj_initialized:
-                        self._load_refs(self.grasping_point_L_base, self.grasping_point_R_base, grasping_R_L, grasping_R_R)
+                        self._load_refs(
+                            self.grasping_point_L_base,
+                            self.grasping_point_R_base,
+                            grasping_R_L,
+                            grasping_R_R,
+                        )
                         traj_initialized = True
                         t_idx = 0
-                    
+
                     if t_idx < self.traj_len:
                         p_ref_L, v_ref_L = self.p_ref_L[t_idx], self.v_ref_L[t_idx]
                         R_ref_L, w_ref_L = self.R_ref_L[t_idx], self.w_ref_L[t_idx]
                         p_ref_R, v_ref_R = self.p_ref_R[t_idx], self.v_ref_R[t_idx]
                         R_ref_R, w_ref_R = self.R_ref_R[t_idx], self.w_ref_R[t_idx]
                         t_idx += 1
-                
-                # Desired Wrench -> Acceleration (Left)
+
                 M_L = self.robotL.get_M(q_L)
                 Lam_L, Lam_inv_L = self.robotL.get_Lambda_and_inv(J_L, M_L)
                 D_L = self.robotL.get_D(self.robotL.K, Lam_L)
                 e_p_L, e_v_L = p_ref_L - p_L, v_ref_L - v_L
                 e_r_L, e_w_L = short_arc_log(R_ref_L, R_L), w_ref_L - w_L
-                f_des_L = self.robotL.wrench_desired(self.robotL.K, D_L, e_p_L, e_r_L, e_v_L, e_w_L)
+                f_des_L = self.robotL.wrench_desired(
+                    self.robotL.K, D_L, e_p_L, e_r_L, e_v_L, e_w_L
+                )
                 a_des_L = Lam_inv_L @ f_des_L
 
-                # Desired Wrench -> Acceleration (Right)
                 M_R = self.robotR.get_M(q_R)
                 Lam_R, Lam_inv_R = self.robotR.get_Lambda_and_inv(J_R, M_R)
                 D_R = self.robotR.get_D(self.robotR.K, Lam_R)
                 e_p_R, e_v_R = p_ref_R - p_R, v_ref_R - v_R
                 e_r_R, e_w_R = short_arc_log(R_ref_R, R_R), w_ref_R - w_R
-                f_des_R = self.robotR.wrench_desired(self.robotR.K, D_R, e_p_R, e_r_R, e_v_R, e_w_R)
+                f_des_R = self.robotR.wrench_desired(
+                    self.robotR.K, D_R, e_p_R, e_r_R, e_v_R, e_w_R
+                )
                 a_des_R = Lam_inv_R @ f_des_R
 
                 # ==========================================================
                 # 2. ADMITTANCE (Force Tracking)
                 # ==========================================================
-                # Reference vector
                 F_L_ref = self.ref_force * n_L
                 F_R_ref = self.ref_force * n_R
-                F_n_L = float(F_L @ n_L) #plots
+                F_n_L = float(F_L @ n_L)  # plots
                 F_n_R = float(F_R @ n_R)
 
-                # Vector errors
                 e_P_L = F_L_ref - F_L
                 e_P_R = F_R_ref - F_R
 
@@ -399,18 +449,21 @@ class DualArmImpedanceAdmittanceQP:
                 self.e_P_L_prev = e_P_L
                 self.e_P_R_prev = e_P_R
 
-                v_n_L_star = np.clip(self.k_p * e_P_L + self.k_d * e_D_L, -self.v_max, self.v_max)
-                v_n_R_star = np.clip(self.k_p * e_P_R + self.k_d * e_D_R, -self.v_max, self.v_max)
-                
+                v_n_L_star = np.clip(
+                    self.k_p * e_P_L + self.k_d * e_D_L, -self.v_max, self.v_max
+                )
+                v_n_R_star = np.clip(
+                    self.k_p * e_P_R + self.k_d * e_D_R, -self.v_max, self.v_max
+                )
+
                 v_star_L = v_n_L_star * n_L
                 v_star_R = v_n_R_star * n_R
 
                 xdot_star_L = np.hstack([v_star_L, np.zeros(3)])
                 xdot_star_R = np.hstack([v_star_R, np.zeros(3)])
-                
+
                 t_model_total = time.perf_counter() - t_model_start
 
-                # --- feed QP ---
                 self.J_L_p.value = _freeze_sparsity(J_L)
                 self.J_dot_L_p.value = _freeze_sparsity(J_dot_L)
                 self.q_L_p.value = q_L
@@ -439,7 +492,6 @@ class DualArmImpedanceAdmittanceQP:
                 status = (self.qp.status or "").lower()
                 ok = status in ("optimal", "optimal_inaccurate")
 
-                # extract accelerations; integrate to velocity command
                 if ok:
                     qddot_L_cmd = _as_rowvec_1d(self.qddot_L.value, "qddot_L", 6)
                     qddot_R_cmd = _as_rowvec_1d(self.qddot_R.value, "qddot_R", 6)
@@ -448,67 +500,108 @@ class DualArmImpedanceAdmittanceQP:
                 else:
                     qddot_L_cmd = np.zeros(6)
                     qddot_R_cmd = np.zeros(6)
-                    qdot_L_cmd = qdot_L  # hold measured
+                    qdot_L_cmd = qdot_L
                     qdot_R_cmd = qdot_R
 
-                # --- send (UR speedJ expects target joint velocities) ---
                 self.robotL.speedJ(qdot_L_cmd.tolist(), dt)
                 self.robotR.speedJ(qdot_R_cmd.tolist(), dt)
 
-                # --- Logging Calculations ---
                 e_imp_L_val = J_L @ qddot_L_cmd + J_dot_L @ qdot_L - a_des_L
-                imp_L_term = float((self.W_imp_L @ e_imp_L_val).T @ (self.W_imp_L @ e_imp_L_val))
-                
+                imp_L_term = float(
+                    (self.W_imp_L @ e_imp_L_val).T @ (self.W_imp_L @ e_imp_L_val)
+                )
+
                 x_dot_next_L = J_L @ (qdot_L + qddot_L_cmd * dt)
                 e_grasp_L_val = x_dot_next_L - xdot_star_L
-                grasp_L_term = float((self.W_grasp_L_np @ e_grasp_L_val).T @ (self.W_grasp_L_np @ e_grasp_L_val))
-                
-                # Right Terms
+                grasp_L_term = float(
+                    (self.W_grasp_L_np @ e_grasp_L_val).T
+                    @ (self.W_grasp_L_np @ e_grasp_L_val)
+                )
+
                 e_imp_R_val = J_R @ qddot_R_cmd + J_dot_R @ qdot_R - a_des_R
-                imp_R_term = float((self.W_imp_R @ e_imp_R_val).T @ (self.W_imp_R @ e_imp_R_val))
+                imp_R_term = float(
+                    (self.W_imp_R @ e_imp_R_val).T @ (self.W_imp_R @ e_imp_R_val)
+                )
                 x_dot_next_R = J_R @ (qdot_R + qddot_R_cmd * dt)
                 e_grasp_R_val = x_dot_next_R - xdot_star_R
-                grasp_R_term = float((self.W_grasp_R_np @ e_grasp_R_val).T @ (self.W_grasp_R_np @ e_grasp_R_val))
-                
-                reg_term = float(self.lambda_reg) * (float(qddot_L_cmd @ qddot_L_cmd) + float(qddot_R_cmd @ qddot_R_cmd))
-                obj_total = imp_L_term + imp_R_term + grasp_L_term + grasp_R_term + reg_term
+                grasp_R_term = float(
+                    (self.W_grasp_R_np @ e_grasp_R_val).T
+                    @ (self.W_grasp_R_np @ e_grasp_R_val)
+                )
+
+                reg_term = float(self.lambda_reg) * (
+                    float(qddot_L_cmd @ qddot_L_cmd) + float(qddot_R_cmd @ qddot_R_cmd)
+                )
+                obj_total = (
+                    imp_L_term + imp_R_term + grasp_L_term + grasp_R_term + reg_term
+                )
 
                 tcp_L = {
-                    "p": p_L, "v": v_L, "w": w_L, "rvec": RR.from_matrix(R_L).as_rotvec(),
-                    "p_ref": p_ref_L, "v_ref": v_ref_L, "w_ref": w_ref_L, "rvec_ref": RR.from_matrix(R_ref_L).as_rotvec(),
-                    "e_p": e_p_L, "e_v": e_v_L, "e_w": e_w_L, "e_r": e_r_L
+                    "p": p_L,
+                    "v": v_L,
+                    "w": w_L,
+                    "rvec": RR.from_matrix(R_L).as_rotvec(),
+                    "p_ref": p_ref_L,
+                    "v_ref": v_ref_L,
+                    "w_ref": w_ref_L,
+                    "rvec_ref": RR.from_matrix(R_ref_L).as_rotvec(),
+                    "e_p": e_p_L,
+                    "e_v": e_v_L,
+                    "e_w": e_w_L,
+                    "e_r": e_r_L,
                 }
                 tcp_R = {
-                    "p": p_R, "v": v_R, "w": w_R, "rvec": RR.from_matrix(R_R).as_rotvec(),
-                    "p_ref": p_ref_R, "v_ref": v_ref_R, "w_ref": w_ref_R, "rvec_ref": RR.from_matrix(R_ref_R).as_rotvec(),
-                    "e_p": e_p_R, "e_v": e_v_R, "e_w": e_w_R, "e_r": e_r_R
+                    "p": p_R,
+                    "v": v_R,
+                    "w": w_R,
+                    "rvec": RR.from_matrix(R_R).as_rotvec(),
+                    "p_ref": p_ref_R,
+                    "v_ref": v_ref_R,
+                    "w_ref": w_ref_R,
+                    "rvec_ref": RR.from_matrix(R_ref_R).as_rotvec(),
+                    "e_p": e_p_R,
+                    "e_v": e_v_R,
+                    "e_w": e_w_R,
+                    "e_r": e_r_R,
                 }
 
-                self.control_data.append({
-                    "t": time.time(),
-                    "i": i,
-                    "status": status,
-                    "solver_time": solve_dt,
-                    "model_time": t_model_total,
-                    "obj_break": {
-                        "imp_L": imp_L_term, "imp_R": imp_R_term,
-                        "grasp_L": grasp_L_term, "grasp_R": grasp_R_term,
-                        "reg": reg_term, "total": obj_total
-                    },
-                    "force_data": {
-                        "F_L_vec": F_L,      "F_R_vec": F_R,
-                        "F_L_ref": F_L_ref,  "F_R_ref": F_R_ref,
-                        "F_n_star": self.ref_force,
-                        "v_star_L": v_star_L, "v_star_R": v_star_R, 
-                        "F_n_L": F_n_L,      "F_n_R": F_n_R,
-                    },
-                    "tcp_L": tcp_L,
-                    "tcp_R": tcp_R,
-                    "q_L": q_L, "q_dot_L": qdot_L, "q_ddot_L": qddot_L_cmd,
-                    "q_R": q_R, "q_dot_R": qdot_R, "q_ddot_R": qddot_R_cmd,
-                })
+                self.control_data.append(
+                    {
+                        "t": time.time(),
+                        "i": i,
+                        "status": status,
+                        "solver_time": solve_dt,
+                        "model_time": t_model_total,
+                        "obj_break": {
+                            "imp_L": imp_L_term,
+                            "imp_R": imp_R_term,
+                            "grasp_L": grasp_L_term,
+                            "grasp_R": grasp_R_term,
+                            "reg": reg_term,
+                            "total": obj_total,
+                        },
+                        "force_data": {
+                            "F_L_vec": F_L,
+                            "F_R_vec": F_R,
+                            "F_L_ref": F_L_ref,
+                            "F_R_ref": F_R_ref,
+                            "F_n_star": self.ref_force,
+                            "v_star_L": v_star_L,
+                            "v_star_R": v_star_R,
+                            "F_n_L": F_n_L,
+                            "F_n_R": F_n_R,
+                        },
+                        "tcp_L": tcp_L,
+                        "tcp_R": tcp_R,
+                        "q_L": q_L,
+                        "q_dot_L": qdot_L,
+                        "q_ddot_L": qddot_L_cmd,
+                        "q_R": q_R,
+                        "q_dot_R": qdot_R,
+                        "q_ddot_R": qddot_R_cmd,
+                    }
+                )
 
-                # --- perf ---
                 elapsed_loop = time.perf_counter() - loop_start
                 self._win_loop_time += elapsed_loop
                 self._win_iters += 1
@@ -518,13 +611,18 @@ class DualArmImpedanceAdmittanceQP:
                     self._total_deadline_miss += 1
 
                 now = time.perf_counter()
-                if now - self._last_log_wall >= self.log_every_s and self._win_iters > 0:
+                if (
+                    now - self._last_log_wall >= self.log_every_s
+                    and self._win_iters > 0
+                ):
                     avg_period = self._win_loop_time / self._win_iters
                     avg_hz = 1.0 / avg_period if avg_period > 0 else np.nan
                     avg_solver_ms = (self._win_solver_time / self._win_iters) * 1000.0
                     miss_pct = 100.0 * self._win_deadline_miss / self._win_iters
-                    print(f"[GRASP DUAL a-OPT] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | "
-                          f"miss {miss_pct:4.1f}% | |F_L|={np.linalg.norm(F_L):6.2f}")
+                    print(
+                        f"[GRASP DUAL a-OPT] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | "
+                        f"miss {miss_pct:4.1f}% | |F_L|={np.linalg.norm(F_L):6.2f}"
+                    )
                     self._win_iters = 0
                     self._win_loop_time = 0.0
                     self._win_solver_time = 0.0
@@ -540,46 +638,44 @@ class DualArmImpedanceAdmittanceQP:
             except Exception as e:
                 print(f"[ERROR] {e}")
                 import traceback
+
                 traceback.print_exc()
                 break
 
         self.robotL.speedStop()
         self.robotR.speedStop()
         total_time = time.perf_counter() - self._ctrl_start_wall
-        print(f"[GRASP DUAL a-OPT SUMMARY] Ran {self._total_iters} iters @ "
-              f"{self._total_iters/total_time:.1f} Hz")
-        
-    def plot_taskspace(self, arm: str, title_prefix="TaskspaceTracking"):
-        """
-        Plots task-space tracking performance for a specific arm.
-        arm: "L" or "R"
-        """
-        if not self.control_data:
-            print("No control_data to plot."); return
+        print(
+            f"[GRASP DUAL a-OPT SUMMARY] Ran {self._total_iters} iters @ "
+            f"{self._total_iters / total_time:.1f} Hz"
+        )
 
-        # Select the correct key based on the arm argument
+    def plot_taskspace(self, arm: str, title_prefix="TaskspaceTracking"):
+        if not self.control_data:
+            print("No control_data to plot.")
+            return
+
         key = f"tcp_{arm.upper()}"
         if key not in self.control_data[0]:
-            print(f"Key {key} not found in control_data."); return
+            print(f"Key {key} not found in control_data.")
+            return
 
         os.makedirs("plots", exist_ok=True)
-        
-        # Time array
+
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
         timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         colors = plt.cm.tab10(np.arange(3))
         labels = ["X", "Y", "Z"]
 
-        # Extract data using the specific key (tcp_L or tcp_R)
-        P        = np.array([d[key]["p"]        for d in self.control_data])
-        V        = np.array([d[key]["v"]        for d in self.control_data])
-        RVEC     = np.array([d[key]["rvec"]     for d in self.control_data])
-        W        = np.array([d[key]["w"]        for d in self.control_data])
-        P_ref    = np.array([d[key]["p_ref"]    for d in self.control_data])
-        V_ref    = np.array([d[key]["v_ref"]    for d in self.control_data])
+        P = np.array([d[key]["p"] for d in self.control_data])
+        V = np.array([d[key]["v"] for d in self.control_data])
+        RVEC = np.array([d[key]["rvec"] for d in self.control_data])
+        W = np.array([d[key]["w"] for d in self.control_data])
+        P_ref = np.array([d[key]["p_ref"] for d in self.control_data])
+        V_ref = np.array([d[key]["v_ref"] for d in self.control_data])
         RVEC_ref = np.array([d[key]["rvec_ref"] for d in self.control_data])
-        W_ref    = np.array([d[key]["w_ref"]    for d in self.control_data])
+        W_ref = np.array([d[key]["w_ref"] for d in self.control_data])
 
         E_p = np.array([d[key]["e_p"] for d in self.control_data])
         E_v = np.array([d[key]["e_v"] for d in self.control_data])
@@ -591,256 +687,317 @@ class DualArmImpedanceAdmittanceQP:
         E_w_mag = np.linalg.norm(E_w, axis=1)
         E_r_mag = np.linalg.norm(E_r, axis=1)
 
-        # Your exact plotting structure
         fig, axes = plt.subplots(4, 2, figsize=(18, 16), sharex=True)
-        fig.suptitle(f"{title_prefix} Robot_{arm} – {timestamp_str}", fontsize=14, y=0.99)
+        fig.suptitle(
+            f"{title_prefix} Robot_{arm} – {timestamp_str}", fontsize=14, y=0.99
+        )
 
         ax = axes[0, 0]
         for k in range(3):
             ax.plot(t, P[:, k], color=colors[k], label=f"p{labels[k]}")
-            ax.plot(t, P_ref[:, k], "--", color=colors[k], alpha=0.9, label=f"p{labels[k]} ref")
-        ax.set_title("Position vs Ref"); ax.set_ylabel("m"); ax.grid(True, alpha=0.3); ax.legend(ncol=3, fontsize=8)
+            ax.plot(
+                t,
+                P_ref[:, k],
+                "--",
+                color=colors[k],
+                alpha=0.9,
+                label=f"p{labels[k]} ref",
+            )
+        ax.set_title("Position vs Ref")
+        ax.set_ylabel("m")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
 
         ax = axes[0, 1]
         for k in range(3):
             ax.plot(t, E_p[:, k], color=colors[k], label=f"e_p{labels[k]}")
         ax.plot(t, E_p_mag, "-", linewidth=2.0, color="black", label="‖e_p‖")
-        ax.set_title("Translational Error"); ax.set_ylabel("m"); ax.grid(True, alpha=0.3); ax.legend(ncol=4, fontsize=8)
+        ax.set_title("Translational Error")
+        ax.set_ylabel("m")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=4, fontsize=8)
 
         ax = axes[1, 0]
         for k in range(3):
             ax.plot(t, RVEC[:, k], color=colors[k], label=f"r{labels[k]}")
-            ax.plot(t, RVEC_ref[:, k], "--", color=colors[k], alpha=0.9, label=f"r{labels[k]} ref")
-        ax.set_title("Rotation (rotvec) vs Ref"); ax.set_ylabel("rad"); ax.grid(True, alpha=0.3); ax.legend(ncol=3, fontsize=8)
+            ax.plot(
+                t,
+                RVEC_ref[:, k],
+                "--",
+                color=colors[k],
+                alpha=0.9,
+                label=f"r{labels[k]} ref",
+            )
+        ax.set_title("Rotation (rotvec) vs Ref")
+        ax.set_ylabel("rad")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
 
         ax = axes[1, 1]
         for k in range(3):
             ax.plot(t, E_r[:, k], color=colors[k], label=f"e_r{labels[k]}")
         ax.plot(t, E_r_mag, "-", linewidth=2.0, color="black", label="‖e_r‖")
-        ax.set_title("Rotational Error"); ax.set_ylabel("rad"); ax.grid(True, alpha=0.3); ax.legend(ncol=4, fontsize=8)
+        ax.set_title("Rotational Error")
+        ax.set_ylabel("rad")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=4, fontsize=8)
 
         ax = axes[2, 0]
         for k in range(3):
             ax.plot(t, V[:, k], color=colors[k], label=f"v{labels[k]}")
-            ax.plot(t, V_ref[:, k], "--", color=colors[k], alpha=0.9, label=f"v{labels[k]} ref")
-        ax.set_title("Linear Velocity vs Ref"); ax.set_ylabel("m/s"); ax.grid(True, alpha=0.3); ax.legend(ncol=3, fontsize=8)
+            ax.plot(
+                t,
+                V_ref[:, k],
+                "--",
+                color=colors[k],
+                alpha=0.9,
+                label=f"v{labels[k]} ref",
+            )
+        ax.set_title("Linear Velocity vs Ref")
+        ax.set_ylabel("m/s")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
 
         ax = axes[2, 1]
         for k in range(3):
             ax.plot(t, E_v[:, k], color=colors[k], label=f"e_v{labels[k]}")
         ax.plot(t, E_v_mag, "-", linewidth=2.0, color="black", label="‖e_v‖")
-        ax.set_title("Linear-Velocity Error"); ax.set_ylabel("m/s"); ax.grid(True, alpha=0.3); ax.legend(ncol=4, fontsize=8)
+        ax.set_title("Linear-Velocity Error")
+        ax.set_ylabel("m/s")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=4, fontsize=8)
 
         ax = axes[3, 0]
         for k in range(3):
             ax.plot(t, W[:, k], color=colors[k], label=f"w{labels[k]}")
-            ax.plot(t, W_ref[:, k], "--", color=colors[k], alpha=0.9, label=f"w{labels[k]} ref")
-        ax.set_title("Angular Velocity vs Ref"); ax.set_xlabel("s"); ax.set_ylabel("rad/s"); ax.grid(True, alpha=0.3); ax.legend(ncol=3, fontsize=8)
+            ax.plot(
+                t,
+                W_ref[:, k],
+                "--",
+                color=colors[k],
+                alpha=0.9,
+                label=f"w{labels[k]} ref",
+            )
+        ax.set_title("Angular Velocity vs Ref")
+        ax.set_xlabel("s")
+        ax.set_ylabel("rad/s")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
 
         ax = axes[3, 1]
         for k in range(3):
             ax.plot(t, E_w[:, k], color=colors[k], label=f"e_w{labels[k]}")
         ax.plot(t, E_w_mag, "-", linewidth=2.0, color="black", label="‖e_w‖")
-        ax.set_title("Angular-Velocity Error"); ax.set_xlabel("s"); ax.set_ylabel("rad/s"); ax.grid(True, alpha=0.3); ax.legend(ncol=4, fontsize=8)
+        ax.set_title("Angular-Velocity Error")
+        ax.set_xlabel("s")
+        ax.set_ylabel("rad/s")
+        ax.grid(True, alpha=0.3)
+        ax.legend(ncol=4, fontsize=8)
 
         plt.tight_layout(rect=[0, 0.035, 1, 0.97])
         fname = f"plots/{title_prefix.lower()}_{arm}_{timestamp_str}.png"
-        plt.savefig(fname, dpi=150, bbox_inches="tight"); plt.close()
+        plt.savefig(fname, dpi=150, bbox_inches="tight")
+        plt.close()
 
     def plot_jointspace(self, arm: str, title_prefix="Joint_Space"):
-        """
-        Plots joint position, velocity, acceleration for a specific arm.
-        arm: "L" or "R"
-        """
         if not self.control_data:
-            print("No control_data to plot."); return
+            print("No control_data to plot.")
+            return
         os.makedirs("plots", exist_ok=True)
 
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
         timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-        # Select keys based on arm
         q_key = f"q_{arm.upper()}"
         qd_key = f"q_dot_{arm.upper()}"
         qdd_key = f"q_ddot_{arm.upper()}"
 
-        q     = np.array([d[q_key] for d in self.control_data])
-        qdot  = np.array([d[qd_key] for d in self.control_data])
+        q = np.array([d[q_key] for d in self.control_data])
+        qdot = np.array([d[qd_key] for d in self.control_data])
         qddot = np.array([d[qdd_key] for d in self.control_data])
-        
+
         n = q.shape[1] if q.ndim == 2 else 6
         fig, axs = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
-        fig.suptitle(f"{title_prefix} Robot_{arm} – {timestamp_str}", fontsize=13, y=0.98)
+        fig.suptitle(
+            f"{title_prefix} Robot_{arm} – {timestamp_str}", fontsize=13, y=0.98
+        )
 
         for j in range(n):
-            axs[0].plot(t, q[:, j], label=f"q{j+1}")
-            axs[1].plot(t, qdot[:, j], label=f"q̇{j+1}")
-            axs[2].plot(t, qddot[:, j], label=f"q̈{j+1}")
+            axs[0].plot(t, q[:, j], label=f"q{j + 1}")
+            axs[1].plot(t, qdot[:, j], label=f"q̇{j + 1}")
+            axs[2].plot(t, qddot[:, j], label=f"q̈{j + 1}")
 
-        axs[0].set_ylabel("Position [rad]"); axs[0].legend(fontsize=7, ncol=3); axs[0].grid(True, alpha=0.3)
-        axs[1].set_ylabel("Velocity [rad/s]"); axs[1].legend(fontsize=7, ncol=3); axs[1].grid(True, alpha=0.3)
-        axs[2].set_ylabel("Acceleration [rad/s²]"); axs[2].legend(fontsize=7, ncol=3); axs[2].grid(True, alpha=0.3)
+        axs[0].set_ylabel("Position [rad]")
+        axs[0].legend(fontsize=7, ncol=3)
+        axs[0].grid(True, alpha=0.3)
+        axs[1].set_ylabel("Velocity [rad/s]")
+        axs[1].legend(fontsize=7, ncol=3)
+        axs[1].grid(True, alpha=0.3)
+        axs[2].set_ylabel("Acceleration [rad/s²]")
+        axs[2].legend(fontsize=7, ncol=3)
+        axs[2].grid(True, alpha=0.3)
         axs[2].set_xlabel("Time [s]")
 
         plt.tight_layout(rect=[0, 0, 1, 0.95])
         fname = f"plots/{title_prefix.lower()}_{arm}_{timestamp_str}.png"
-        plt.savefig(fname, dpi=150, bbox_inches="tight"); plt.close()
+        plt.savefig(fname, dpi=150, bbox_inches="tight")
+        plt.close()
 
     def plot_qp_objective(self, title_prefix="QP_Objective_Breakdown"):
-        """Objective-only: total vs impedance (L/R) vs admittance (L/R) vs regularizer."""
         if not self.control_data:
-            print("No control_data to plot."); return
+            print("No control_data to plot.")
+            return
         os.makedirs("plots", exist_ok=True)
 
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
-        
-        # Check for the breakdown dictionary
-        if "obj_break" not in self.control_data[0]:
-            print("No obj_break logged."); return
 
-        # Extract breakdown data
+        if "obj_break" not in self.control_data[0]:
+            print("No obj_break logged.")
+            return
+
         imp_L = np.array([d["obj_break"]["imp_L"] for d in self.control_data])
         imp_R = np.array([d["obj_break"]["imp_R"] for d in self.control_data])
-        
-        # Admittance (Grasp) terms
+
         adm_L = np.array([d["obj_break"]["grasp_L"] for d in self.control_data])
         adm_R = np.array([d["obj_break"]["grasp_R"] for d in self.control_data])
-        
-        reg   = np.array([d["obj_break"]["reg"]   for d in self.control_data])
-        tot   = np.array([d["obj_break"]["total"] for d in self.control_data])
+
+        reg = np.array([d["obj_break"]["reg"] for d in self.control_data])
+        tot = np.array([d["obj_break"]["total"] for d in self.control_data])
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 6))
         fig.suptitle(f"{title_prefix}", fontsize=13, y=0.98)
 
-        # Plot Total
         ax.plot(t, tot, label="Total", linewidth=2.5, color="black", alpha=0.8)
-        
-        # Plot Impedance (Solid Lines)
+
         ax.plot(t, imp_L, label="Imp L", linestyle="-", linewidth=1.5, alpha=0.8)
         ax.plot(t, imp_R, label="Imp R", linestyle="-", linewidth=1.5, alpha=0.8)
-        
-        # Plot Admittance (Dashed Lines)
+
         ax.plot(t, adm_L, label="Adm L", linestyle="--", linewidth=1.5, alpha=0.8)
         ax.plot(t, adm_R, label="Adm R", linestyle="--", linewidth=1.5, alpha=0.8)
-        
-        # Plot Regularizer (Dotted Line)
+
         ax.plot(t, reg, label="Regularizer", linestyle=":", color="gray", linewidth=1.5)
-        
-        ax.set_ylabel("Objective Value"); ax.set_xlabel("Time [s]")
+
+        ax.set_ylabel("Objective Value")
+        ax.set_xlabel("Time [s]")
         ax.grid(True, alpha=0.3)
-        # Use 2 columns for the legend to make it cleaner
         ax.legend(loc="best", fontsize=9, ncol=3)
         ax.set_title("QP Objective Component Breakdown", fontsize=11)
 
         ts_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         fname = f"plots/{title_prefix.lower()}_{ts_str}.png"
-        fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(fname, dpi=150, bbox_inches="tight")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
     def plot_qp_performance(self, title_prefix="QP_Performance"):
-        """Plots solver timing statistics."""
         if not self.control_data:
-            print("No control_data to plot."); return
+            print("No control_data to plot.")
+            return
         os.makedirs("plots", exist_ok=True)
 
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
-        
-        # Extract solver time (convert to ms)
+
         solve_ms = np.array([d["solver_time"] for d in self.control_data]) * 1000.0
-        
-        # Calculate Rolling Frequency (Hz)
+
         loop_diff = np.diff(ts)
-        # Prepend first dt or mean to keep array size same
         if len(loop_diff) > 0:
             loop_diff = np.insert(loop_diff, 0, loop_diff[0])
         else:
             loop_diff = np.zeros_like(ts)
-            
+
         loop_hz = 1.0 / np.maximum(loop_diff, 1e-9)
-        
-        # Simple rolling mean for smoother Hz plot
+
         def rolling_mean(a, w=10):
-            if len(a) < w: return a
-            return np.convolve(a, np.ones(w)/w, mode='same')
-            
+            if len(a) < w:
+                return a
+            return np.convolve(a, np.ones(w) / w, mode="same")
+
         loop_hz_smooth = rolling_mean(loop_hz)
 
         fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
         fig.suptitle(f"{title_prefix}", fontsize=13, y=0.98)
 
-        # Solver Time
         axes[0].plot(t, solve_ms, label="Solver Time", color="orange")
-        axes[0].axhline(y=20.0, color='r', linestyle='--', alpha=0.5, label="20ms limit (50Hz)")
+        axes[0].axhline(
+            y=20.0, color="r", linestyle="--", alpha=0.5, label="20ms limit (50Hz)"
+        )
         axes[0].set_ylabel("Time [ms]")
         axes[0].set_title("Solver Duration per Iteration")
-        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="upper right")
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend(loc="upper right")
 
-        # Loop Frequency
         axes[1].plot(t, loop_hz_smooth, label="Loop Hz (Smoothed)", color="blue")
-        axes[1].axhline(y=self.Hz, color='k', linestyle='--', alpha=0.5, label=f"Target {self.Hz}Hz")
+        axes[1].axhline(
+            y=self.Hz, color="k", linestyle="--", alpha=0.5, label=f"Target {self.Hz}Hz"
+        )
         axes[1].set_ylabel("Frequency [Hz]")
         axes[1].set_xlabel("Time [s]")
         axes[1].set_title("Control Loop Frequency")
-        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="lower right")
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend(loc="lower right")
 
         ts_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         fname = f"plots/{title_prefix.lower()}_{ts_str}.png"
-        fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(fname, dpi=150, bbox_inches="tight")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.savefig(fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
     def plot_force_tracking(self, title_prefix="ForceTracking"):
-        if not self.control_data: return
+        if not self.control_data:
+            return
         os.makedirs("plots", exist_ok=True)
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
-        timestamp = datetime.datetime.now().strftime('%H-%M-%S')
+        timestamp = datetime.datetime.now().strftime("%H-%M-%S")
 
-        # Extract Vectors
         F_L = np.array([d["force_data"]["F_L_vec"] for d in self.control_data])
         F_R = np.array([d["force_data"]["F_R_vec"] for d in self.control_data])
         F_L_ref = np.array([d["force_data"]["F_L_ref"] for d in self.control_data])
         F_R_ref = np.array([d["force_data"]["F_R_ref"] for d in self.control_data])
-        
-        # Extract Magnitudes (approximating Normal Force Magnitude if aligned)
-        # Note: F_star is scalar
-        F_star_scalar = np.array([d["force_data"]["F_n_star"] for d in self.control_data])
-        
+
+        F_star_scalar = np.array(
+            [d["force_data"]["F_n_star"] for d in self.control_data]
+        )
+
         F_L_mag = np.linalg.norm(F_L, axis=1)
         F_R_mag = np.linalg.norm(F_R, axis=1)
 
         fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
         fig.suptitle(f"Force Tracking Components & Magnitude", fontsize=14)
 
-        labels = ['x', 'y', 'z']
-        colors = ['r', 'g', 'b']
+        labels = ["x", "y", "z"]
+        colors = ["r", "g", "b"]
 
-        # 1. Left Arm Components
         ax = axes[0]
         for i in range(3):
             ax.plot(t, F_L[:, i], color=colors[i], label=f"F_L_{labels[i]}")
-            ax.plot(t, F_L_ref[:, i], color=colors[i], linestyle='--', alpha=0.6)
-        ax.set_ylabel("Force [N]"); ax.set_title("Left Arm Force Components (Solid) vs Ref (Dashed)")
-        ax.grid(True, alpha=0.3); ax.legend(loc="upper right", ncol=3, fontsize='small')
+            ax.plot(t, F_L_ref[:, i], color=colors[i], linestyle="--", alpha=0.6)
+        ax.set_ylabel("Force [N]")
+        ax.set_title("Left Arm Force Components (Solid) vs Ref (Dashed)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper right", ncol=3, fontsize="small")
 
-        # 2. Right Arm Components
         ax = axes[1]
         for i in range(3):
             ax.plot(t, F_R[:, i], color=colors[i], label=f"F_R_{labels[i]}")
-            ax.plot(t, F_R_ref[:, i], color=colors[i], linestyle='--', alpha=0.6)
-        ax.set_ylabel("Force [N]"); ax.set_title("Right Arm Force Components (Solid) vs Ref (Dashed)")
-        ax.grid(True, alpha=0.3); ax.legend(loc="upper right", ncol=3, fontsize='small')
+            ax.plot(t, F_R_ref[:, i], color=colors[i], linestyle="--", alpha=0.6)
+        ax.set_ylabel("Force [N]")
+        ax.set_title("Right Arm Force Components (Solid) vs Ref (Dashed)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper right", ncol=3, fontsize="small")
 
-        # 3. Magnitudes
         ax = axes[2]
         ax.plot(t, F_L_mag, label="|F_L| (meas)")
         ax.plot(t, F_R_mag, label="|F_R| (meas)")
         ax.plot(t, F_star_scalar, "k--", label="F* (scalar ref)")
-        ax.set_ylabel("Force Magnitude [N]"); ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Force Magnitude [N]")
+        ax.set_xlabel("Time [s]")
         ax.set_title("Force Magnitudes")
-        ax.grid(True, alpha=0.3); ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.legend()
 
         plt.tight_layout()
         plt.savefig(f"plots/{title_prefix}_{timestamp}.png")
@@ -856,23 +1013,18 @@ class DualArmImpedanceAdmittanceQP:
         ts = np.array([d["t"] for d in self.control_data])
         t = ts - ts[0]
 
-        # Scalars stored inside force_data
         F_n_L = np.array([d["force_data"]["F_n_L"] for d in self.control_data])
         F_n_R = np.array([d["force_data"]["F_n_R"] for d in self.control_data])
         ref_force = np.array([d["force_data"]["F_n_star"] for d in self.control_data])
 
-        # Here I'm assuming you want the *Y* component of v_star_* (since your ylabel says TCP Y vel)
-        # If your normal is some other axis, change [1] to the correct index or project onto the normal.
         v_n_L = np.array([d["force_data"]["v_star_L"][1] for d in self.control_data])
         v_n_R = np.array([d["force_data"]["v_star_R"][1] for d in self.control_data])
 
-        # QP objective total from obj_break
         obj = np.array([d["obj_break"]["total"] for d in self.control_data])
 
         fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
         fig.suptitle(f"{title_prefix} – {datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
 
-        # --- normal forces ---
         ax = axes[0]
         ax.plot(t, F_n_L, label="F_n_L meas")
         ax.plot(t, F_n_R, label="F_n_R meas")
@@ -882,7 +1034,6 @@ class DualArmImpedanceAdmittanceQP:
         ax.legend()
         ax.set_title("Normal Force vs Ref")
 
-        # --- admittance commanded velocity (Y component here) ---
         ax = axes[1]
         ax.plot(t, v_n_L, label="v*_n L (Y)")
         ax.plot(t, v_n_R, label="v*_n R (Y)")
@@ -891,7 +1042,6 @@ class DualArmImpedanceAdmittanceQP:
         ax.legend()
         ax.set_title("Admittance Command Velocity")
 
-        # --- QP objective ---
         ax = axes[2]
         ax.plot(t, obj, label="QP objective")
         ax.set_ylabel("Objective")
@@ -906,23 +1056,20 @@ class DualArmImpedanceAdmittanceQP:
 
 
 if __name__ == "__main__":
-    # Stiffness
     K = np.diag([10, 10, 10, 0.2, 0.2, 0.2])
-    
+
     robot_L = URImpedanceController("192.168.1.33", K=K)
     robot_R = URImpedanceController("192.168.1.66", K=K)
 
     W_imp = diag6([1.0, 1.0, 1.0, 1e5, 1e5, 1e5])
-    #W_imp = diag6([0, 0, 0, 0, 0, 0])
+    # W_imp = diag6([0, 0, 0, 0, 0, 0])
     W_grasp = diag6([5e1, 5e1, 5e1, 1e7, 1e7, 1e7])
-    #W_grasp = diag6([0, 0, 0, 0, 0, 0])
+    # W_grasp = diag6([0, 0, 0, 0, 0, 0])
     lambda_reg = 1e-6
-    # Admittance Params (PD)
     k_p = 6e-4
     k_d = 2e-4
     v_max = 0.5
     F = 20
-
 
     traj_path = "motion_planner/trajectories_old/lift_100.npz"
     Hz = 50
@@ -932,10 +1079,15 @@ if __name__ == "__main__":
         robot_R=robot_R,
         Hz=Hz,
         trajectory_npz_path=traj_path,
-        W_imp_L=W_imp, W_imp_R=W_imp,
-        W_grasp_L=W_grasp, W_grasp_R=W_grasp,
+        W_imp_L=W_imp,
+        W_imp_R=W_imp,
+        W_grasp_L=W_grasp,
+        W_grasp_R=W_grasp,
         lambda_reg=lambda_reg,
-        k_p=k_p, k_d=k_d, v_max=v_max, ref_force=F
+        k_p=k_p,
+        k_d=k_d,
+        v_max=v_max,
+        ref_force=F,
     )
 
     try:
@@ -946,17 +1098,23 @@ if __name__ == "__main__":
         robot_L.wait_for_commands()
 
         print("Moving to Home...")
-        robot_L.go_home(); robot_R.go_home()
-        robot_L.wait_for_commands(); robot_R.wait_for_commands()
-        robot_L.wait_until_done(); robot_R.wait_until_done()
-        
+        robot_L.go_home()
+        robot_R.go_home()
+        robot_L.wait_for_commands()
+        robot_R.wait_for_commands()
+        robot_L.wait_until_done()
+        robot_R.wait_until_done()
+
         print("Moving to Approach...")
-        robot_L.go_to_approach(); robot_R.go_to_approach()
-        robot_L.wait_for_commands(); robot_R.wait_for_commands()
-        robot_L.wait_until_done(); robot_R.wait_until_done()
+        robot_L.go_to_approach()
+        robot_R.go_to_approach()
+        robot_L.wait_for_commands()
+        robot_R.wait_for_commands()
+        robot_L.wait_until_done()
+        robot_R.wait_until_done()
 
         ctrl.run()
-        
+
         ctrl.plot_taskspace("L")
         ctrl.plot_taskspace("R")
         ctrl.plot_jointspace("L")
@@ -972,6 +1130,8 @@ if __name__ == "__main__":
         robot_L.stop_control()
     finally:
         try:
-            robot_L.disconnect(); robot_R.disconnect()
-        except: pass
+            robot_L.disconnect()
+            robot_R.disconnect()
+        except:
+            pass
         print("Robots disconnected.")

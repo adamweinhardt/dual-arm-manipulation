@@ -13,34 +13,24 @@ from utils.utils import _freeze_sparsity
 
 
 class DualArmGraspingQPAccel:
-    """
-    Dual-arm grasping controller:
-    - Objective tracks an admittance-generated TCP twist along the gripper normal.
-    - Decision vars: joint accelerations qddot_L, qddot_R
-    - Integrate to velocity: qdot_next = qdot_meas + qddot * dt
-    - Send qdot_next via speedJ
-    - Constraints (one-step lookahead):
-        q_next   = q + qdot * dt + 0.5 * qddot * dt^2 within [q_min, q_max]
-        qdot_next = qdot + qddot * dt within [qdot_min, qdot_max]
-        qddot within [qddot_min, qddot_max]
-    """
     def __init__(self, robotL, robotR, Hz):
         self.robotL = robotL
         self.robotR = robotR
         self.Hz = Hz
-        self.normal_L = self.robotL.world_vector_2_robot(self.robotL.get_grasping_data()[2])
-        self.normal_R = self.robotR.world_vector_2_robot(self.robotR.get_grasping_data()[2])
+        self.normal_L = self.robotL.world_vector_2_robot(
+            self.robotL.get_grasping_data()[2]
+        )
+        self.normal_R = self.robotR.world_vector_2_robot(
+            self.robotR.get_grasping_data()[2]
+        )
 
-        # logging
         self.log_every_s = 1.0
         self.control_data = []
 
-        # limits (tune to your UR model as needed)
-        self.joint_pose_limit   = np.deg2rad(360.0)   # symmetric limits around 0 for simplicity
-        self.joint_speed_limit  = np.deg2rad(180.0)
-        self.joint_accel_limit  = np.deg2rad(120.0)
+        self.joint_pose_limit = np.deg2rad(360.0)
+        self.joint_speed_limit = np.deg2rad(180.0)
+        self.joint_accel_limit = np.deg2rad(120.0)
 
-        # perf
         self._ctrl_start_wall = None
         self._last_log_wall = None
         self._win_iters = 0
@@ -51,13 +41,11 @@ class DualArmGraspingQPAccel:
         self._total_solver_time = 0.0
         self._total_deadline_miss = 0
 
-    # ---------------------- build QP (accelerations) ----------------------
     def build_qp(self, dt):
         n = 6
         self.qddot_L = cp.Variable(n, name="qddot_L")
         self.qddot_R = cp.Variable(n, name="qddot_R")
 
-        # parameters (updated every loop)
         self.J_L_p = cp.Parameter((6, n), name="J_L")
         self.J_R_p = cp.Parameter((6, n), name="J_R")
         self.q_L_p = cp.Parameter(n, name="q_L")
@@ -70,35 +58,36 @@ class DualArmGraspingQPAccel:
         dt_c = cp.Constant(float(dt))
         dt2_c = cp.Constant(float(dt * dt * 0.5))
 
-        # next-step velocities and positions (one-step forward Euler / constant-accel)
         qdot_next_L = self.qdot_L_p + self.qddot_L * dt_c
         qdot_next_R = self.qdot_R_p + self.qddot_R * dt_c
         q_next_L = self.q_L_p + self.qdot_L_p * dt_c + self.qddot_L * dt2_c
         q_next_R = self.q_R_p + self.qdot_R_p * dt_c + self.qddot_R * dt2_c
 
-        # next-step TCP twists
         xdot_next_L = self.J_L_p @ qdot_next_L
         xdot_next_R = self.J_R_p @ qdot_next_R
 
-        # objective: track admittance twists + small regularization
         obj_L = cp.sum_squares(xdot_next_L - self.xdot_star_L)
         obj_R = cp.sum_squares(xdot_next_R - self.xdot_star_R)
-        # mild damping on accelerations to avoid jerk
         obj_reg = 1e-6 * (cp.sum_squares(self.qddot_L) + cp.sum_squares(self.qddot_R))
         obj = obj_L + obj_R + obj_reg
 
-        # limits (symmetric boxes here; replace with per-joint vectors if you have them)
-        q_pos_lim   = self.joint_pose_limit
-        q_vel_lim   = self.joint_speed_limit
-        q_acc_lim   = self.joint_accel_limit
+        q_pos_lim = self.joint_pose_limit
+        q_vel_lim = self.joint_speed_limit
+        q_acc_lim = self.joint_accel_limit
 
         cons = [
-            -q_pos_lim <= q_next_L, q_next_L <= q_pos_lim,
-            -q_pos_lim <= q_next_R, q_next_R <= q_pos_lim,
-            -q_vel_lim <= qdot_next_L, qdot_next_L <= q_vel_lim,
-            -q_vel_lim <= qdot_next_R, qdot_next_R <= q_vel_lim,
-            -q_acc_lim <= self.qddot_L, self.qddot_L <= q_acc_lim,
-            -q_acc_lim <= self.qddot_R, self.qddot_R <= q_acc_lim,
+            -q_pos_lim <= q_next_L,
+            q_next_L <= q_pos_lim,
+            -q_pos_lim <= q_next_R,
+            q_next_R <= q_pos_lim,
+            -q_vel_lim <= qdot_next_L,
+            qdot_next_L <= q_vel_lim,
+            -q_vel_lim <= qdot_next_R,
+            qdot_next_R <= q_vel_lim,
+            -q_acc_lim <= self.qddot_L,
+            self.qddot_L <= q_acc_lim,
+            -q_acc_lim <= self.qddot_R,
+            self.qddot_R <= q_acc_lim,
         ]
 
         self.qp = cp.Problem(cp.Minimize(obj), cons)
@@ -115,7 +104,7 @@ class DualArmGraspingQPAccel:
         )
 
     # ---------------------- control loop ----------------------
-    def run(self, ref_force=15.0, k_p=3e-4, k_d =1e-4, v_max=0.02):
+    def run(self, ref_force=15.0, k_p=3e-4, k_d=1e-4, v_max=0.02):
         dt = 1.0 / self.Hz
         self.build_qp(dt)
         self.control_stop = threading.Event()
@@ -125,15 +114,17 @@ class DualArmGraspingQPAccel:
 
         self._ctrl_start_wall = time.perf_counter()
         self._last_log_wall = time.perf_counter()
-        print(f"[GRASP DUAL a-OPT] starting | F*_n={ref_force} N, k_p={k_p}, vmax={v_max}")
+        print(
+            f"[GRASP DUAL a-OPT] starting | F*_n={ref_force} N, k_p={k_p}, vmax={v_max}"
+        )
 
         while not self.control_stop.is_set():
             loop_start = time.perf_counter()
             try:
                 # --- state LEFT ---
                 state_L = self.robotL.get_state()
-                q_L     = self.robotL.get_q()
-                qdot_L  = self.robotL.get_qdot()
+                q_L = self.robotL.get_q()
+                qdot_L = self.robotL.get_qdot()
                 n_L = self.normal_L
                 F_L = np.array(state_L["filtered_force"][:3])
                 F_n_L = float(n_L @ F_L)
@@ -141,8 +132,8 @@ class DualArmGraspingQPAccel:
 
                 # --- state RIGHT ---
                 state_R = self.robotR.get_state()
-                q_R     = self.robotR.get_q()
-                qdot_R  = self.robotR.get_qdot()
+                q_R = self.robotR.get_q()
+                qdot_R = self.robotR.get_qdot()
                 n_R = self.normal_R
                 F_R = np.array(state_R["filtered_force"][:3])
                 F_n_R = float(n_R @ F_R)
@@ -151,7 +142,7 @@ class DualArmGraspingQPAccel:
                 F_L_ref = ref_force * n_L
                 F_R_ref = ref_force * n_R
 
-                # --- admittance (normal-direction only) ---
+                # --- admittance ---
                 e_P_L = F_L_ref - F_L
                 e_P_R = F_R_ref - F_R
 
@@ -184,7 +175,6 @@ class DualArmGraspingQPAccel:
                 self._win_solver_time += solve_dt
                 self._total_solver_time += solve_dt
 
-                # extract accelerations; integrate to velocity command
                 if self.qp.status in ("optimal", "optimal_inaccurate"):
                     qddot_L_cmd = np.asarray(self.qddot_L.value).flatten()
                     qddot_R_cmd = np.asarray(self.qddot_R.value).flatten()
@@ -193,35 +183,34 @@ class DualArmGraspingQPAccel:
                 else:
                     qddot_L_cmd = np.zeros(6)
                     qddot_R_cmd = np.zeros(6)
-                    qdot_L_cmd = qdot_L  # hold measured
+                    qdot_L_cmd = qdot_L
                     qdot_R_cmd = qdot_R
 
-                # --- send (UR speedJ expects target joint velocities) ---
                 self.robotL.speedJ(qdot_L_cmd.tolist(), dt)
                 self.robotR.speedJ(qdot_R_cmd.tolist(), dt)
 
-                # --- log ---
-                self.control_data.append({
-                    "t": time.time(),
-                    "i": i,
-                    "status": self.qp.status,
-                    "obj": self.qp.value,
-                    "F_n_L": F_n_L,
-                    "F_n_R": F_n_R,
-                    "ref_force": ref_force,
-                    "v_n_L_star": v_n_L_star,
-                    "v_n_R_star": v_n_R_star,
-                    "q_L": q_L,
-                    "q_R": q_R,
-                    "qdot_L_meas": qdot_L,
-                    "qdot_R_meas": qdot_R,
-                    "qddot_L_cmd": qddot_L_cmd,
-                    "qddot_R_cmd": qddot_R_cmd,
-                    "qdot_L_cmd": qdot_L_cmd,
-                    "qdot_R_cmd": qdot_R_cmd,
-                })
+                self.control_data.append(
+                    {
+                        "t": time.time(),
+                        "i": i,
+                        "status": self.qp.status,
+                        "obj": self.qp.value,
+                        "F_n_L": F_n_L,
+                        "F_n_R": F_n_R,
+                        "ref_force": ref_force,
+                        "v_n_L_star": v_n_L_star,
+                        "v_n_R_star": v_n_R_star,
+                        "q_L": q_L,
+                        "q_R": q_R,
+                        "qdot_L_meas": qdot_L,
+                        "qdot_R_meas": qdot_R,
+                        "qddot_L_cmd": qddot_L_cmd,
+                        "qddot_R_cmd": qddot_R_cmd,
+                        "qdot_L_cmd": qdot_L_cmd,
+                        "qdot_R_cmd": qdot_R_cmd,
+                    }
+                )
 
-                # --- perf ---
                 elapsed = time.perf_counter() - loop_start
                 self._win_loop_time += elapsed
                 self._win_iters += 1
@@ -231,13 +220,18 @@ class DualArmGraspingQPAccel:
                     self._total_deadline_miss += 1
 
                 now = time.perf_counter()
-                if now - self._last_log_wall >= self.log_every_s and self._win_iters > 0:
+                if (
+                    now - self._last_log_wall >= self.log_every_s
+                    and self._win_iters > 0
+                ):
                     avg_period = self._win_loop_time / self._win_iters
                     avg_hz = 1.0 / avg_period if avg_period > 0 else np.nan
                     avg_solver_ms = (self._win_solver_time / self._win_iters) * 1000.0
                     miss_pct = 100.0 * self._win_deadline_miss / self._win_iters
-                    print(f"[GRASP DUAL a-OPT] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | "
-                          f"miss {miss_pct:4.1f}% | F_L={F_n_L:6.2f} F_R={F_n_R:6.2f}")
+                    print(
+                        f"[GRASP DUAL a-OPT] {avg_hz:6.2f} Hz | solver {avg_solver_ms:6.2f} ms | "
+                        f"miss {miss_pct:4.1f}% | F_L={F_n_L:6.2f} F_R={F_n_R:6.2f}"
+                    )
                     self._win_iters = 0
                     self._win_loop_time = 0.0
                     self._win_solver_time = 0.0
@@ -257,10 +251,11 @@ class DualArmGraspingQPAccel:
         self.robotL.speedStop()
         self.robotR.speedStop()
         total_time = time.perf_counter() - self._ctrl_start_wall
-        print(f"[GRASP DUAL a-OPT SUMMARY] Ran {self._total_iters} iters @ "
-              f"{self._total_iters/total_time:.1f} Hz")
+        print(
+            f"[GRASP DUAL a-OPT SUMMARY] Ran {self._total_iters} iters @ "
+            f"{self._total_iters / total_time:.1f} Hz"
+        )
 
-    # ---------------------- plotting ----------------------
     def plot_force_profile(self, title_prefix="DualGraspAccel_Forces"):
         if not self.control_data:
             print("No control_data to plot.")
@@ -283,18 +278,24 @@ class DualArmGraspingQPAccel:
         ax.plot(t, F_n_R, label="F_n_R meas")
         ax.plot(t, ref_force, "--", color="black", label="F*_n ref")
         ax.set_ylabel("Force [N]")
-        ax.grid(True, alpha=0.3); ax.legend(); ax.set_title("Normal Force vs Ref")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title("Normal Force vs Ref")
 
         ax = axes[1]
         ax.plot(t, v_n_L, label="v*_n L")
         ax.plot(t, v_n_R, label="v*_n R")
         ax.set_ylabel("TCP Y vel [m/s]")
-        ax.grid(True, alpha=0.3); ax.legend(); ax.set_title("Admittance Command Velocity")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        ax.set_title("Admittance Command Velocity")
 
         ax = axes[2]
         ax.plot(t, obj, label="QP objective", color="tab:orange")
-        ax.set_ylabel("Objective"); ax.set_xlabel("Time [s]")
-        ax.grid(True, alpha=0.3); ax.legend()
+        ax.set_ylabel("Objective")
+        ax.set_xlabel("Time [s]")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
 
         plt.tight_layout(rect=[0, 0.02, 1, 0.97])
         fname = f"plots/{title_prefix.lower()}_{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}.png"
@@ -314,22 +315,20 @@ class URImpedanceController(URForceController):
         return np.array(self.rtde_receive.getActualQ(), dtype=float)
 
     def get_qdot(self):
-        # measured joint velocities
         return np.array(self.rtde_receive.getActualQd(), dtype=float)
 
     def get_J(self, q):
         pin.computeJointJacobians(self.pin_model, self.pin_data, q)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
         J = pin.getFrameJacobian(
-            self.pin_model, self.pin_data,
-            self.pin_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+            self.pin_model,
+            self.pin_data,
+            self.pin_frame_id,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
         )
         return self.get_J_pin(J)
 
 
-# --------------------------------------------------------------
-# Entry
-# --------------------------------------------------------------
 if __name__ == "__main__":
     robotL = URImpedanceController("192.168.1.33")
     robotR = URImpedanceController("192.168.1.66")
@@ -352,16 +351,19 @@ if __name__ == "__main__":
         robotR.wait_until_done()
         robotL.wait_until_done()
 
-        robotL.wait_for_commands(); robotR.wait_for_commands()
-        robotL.go_to_approach(); robotR.go_to_approach()
-        robotL.wait_until_done(); robotR.wait_until_done()
+        robotL.wait_for_commands()
+        robotR.wait_for_commands()
+        robotL.go_to_approach()
+        robotR.go_to_approach()
+        robotL.wait_until_done()
+        robotR.wait_until_done()
 
-        # run with acceleration-optimized controller
-        ctrl.run(ref_force=25.0, k_p=5e-4, k_d =1e-4,  v_max=0.5)
+        ctrl.run(ref_force=25.0, k_p=5e-4, k_d=1e-4, v_max=0.5)
         ctrl.plot_force_profile()
 
     except KeyboardInterrupt:
         print("Stopped by user")
     finally:
-        robotL.disconnect(); robotR.disconnect()
+        robotL.disconnect()
+        robotR.disconnect()
         print("Robots disconnected.")

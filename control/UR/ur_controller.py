@@ -1,7 +1,6 @@
 import time
 import threading
 import queue
-from numpy import pi
 import numpy as np
 import zmq
 from rtde_control import RTDEControlInterface
@@ -11,6 +10,7 @@ from robot_ipc_control.pose_estimation.transform_utils import (
     rvec_to_rotmat,
     rotmat_to_rvec,
 )
+
 
 class URController(threading.Thread):
     def __init__(self, ip, hz=50):
@@ -43,7 +43,7 @@ class URController(threading.Thread):
         self.rtde_control = RTDEControlInterface(self.ip)
         self.rtde_receive = RTDEReceiveInterface(self.ip)
         self.rtde_control.zeroFtSensor()
-        
+
         # Command queue for threading
         self.command_queue = queue.Queue()
         self._stop_event = threading.Event()
@@ -54,26 +54,12 @@ class URController(threading.Thread):
         self.context = zmq.Context()
         self.publisher = self.context.socket(zmq.PUB)
         self.publisher.bind(f"tcp://127.0.0.1:{self.port}")
-        
-        self.T_r2w = self.robot_config #4x4 hom transform
-        self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float) #rotation 3x3
+
+        self.T_r2w = self.robot_config  # 4x4 hom transform
+        self.R_r2w = np.array(self.T_r2w[:3, :3], dtype=float)  # rotation 3x3
         self.T_w2r = np.linalg.inv(self.T_r2w)
-        self.R_r2w_pin = np.array([[-1, 0, 0],
-                                   [ 0,-1, 0],
-                                   [ 0, 0, 1]])
-
-        self.t_r2w = self.T_r2w[:3, 3] # +  np.array([0.00, -0.05753, -0.10]) #offset from tcp to my gripper. 3x1
-
-
-        # Defaults
-        # self.home_joints = [
-        #     -pi / 2.0,
-        #     -pi / 2.0,
-        #     pi / 2.0,
-        #     -pi / 2.0,
-        #     -pi / 2.0,
-        #     pi,
-        # ]
+        self.R_r2w_pin = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
+        self.t_r2w = self.T_r2w[:3, 3]
 
         self.home_joints = [
             -1.7570222059832972,
@@ -91,14 +77,12 @@ class URController(threading.Thread):
         self.default_joint_speed = 1.0
         self.default_joint_acceleration = 0.5
 
-        # Data recording
         self.previous_force = None
         self.previous_force_world = None
         self.alpha = 0.70
         self.data = []
         self.forces = []
 
-        # Start threads
         self.start()
 
     def run(self):
@@ -154,7 +138,6 @@ class URController(threading.Thread):
                 robot_state = self.get_state()
 
                 if robot_state and self.publisher:
-                    # convert np arrays to lists for JSON serialization
                     message = {
                         "timestamp": time.time(),
                         "robot_id": self.robot_id,
@@ -207,7 +190,7 @@ class URController(threading.Thread):
                 robot_rvec[2],
             ]
         )
-    
+
     def world_point_2_robot(self, world_point):
         """
         Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
@@ -220,16 +203,16 @@ class URController(threading.Thread):
         local_point_4d = world_to_robot @ world_point_4d
 
         return local_point_4d[:3]
-    
+
     def world_vector_2_robot(self, normal_world):
         """
         Transforms a 3D point [x, y, z] from World Frame to Robot Base Frame.
         """
-        R_r2w = self.robot_config[:3, :3]   # rotation robot → world
-        R_w2r = R_r2w.T                     # inverse rotation
-        
+        R_r2w = self.robot_config[:3, :3]
+        R_w2r = R_r2w.T
+
         return R_w2r @ normal_world
-    
+
     def robot_2_world(self, local_pose, robot_to_world):
         local_pose_6d = np.array(local_pose)
 
@@ -337,7 +320,7 @@ class URController(threading.Thread):
 
     def speedJ(self, joint_speed, dt):
         command = lambda: self.rtde_control.speedJ(
-            joint_speed, self.default_joint_acceleration, dt*4
+            joint_speed, self.default_joint_acceleration, dt * 4
         )
         self.command_queue.put(command)
 
@@ -363,7 +346,6 @@ class URController(threading.Thread):
 
         joints = self.rtde_receive.getActualQ()
 
-        # === COORDINATE TRANSFORMATIONS ===
         pose_world = self.robot_2_world(pose_robot_base, self.robot_config)
 
         rotation_robot_to_world = self.robot_config[:3, :3]
@@ -375,7 +357,6 @@ class URController(threading.Thread):
         torque_vector_world = rotation_robot_to_world @ force_robot_base[3:]
         force_world = np.concatenate((force_vector_world, torque_vector_world))
 
-        # === FILTERING ===
         filtered_force = self.force_low_pass_filter(
             self.previous_force, force_robot_base, self.alpha
         )
@@ -425,6 +406,3 @@ class URController(threading.Thread):
         self.join(timeout=2)
         self.rtde_control.disconnect()
         self.rtde_receive.disconnect()
-
-
-

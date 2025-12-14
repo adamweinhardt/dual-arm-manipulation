@@ -4,7 +4,6 @@ import json
 import numpy as np
 import threading
 import os
-import sys
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from scipy.spatial.transform import Rotation as R
@@ -306,28 +305,26 @@ class GraspingPointsCalculator:
         if best_pair is None:
             return None
 
-        # Use the consistently assigned robot positions
         robot0_grasp_point = best_analysis["robot0_face_center"]
         robot0_normal = best_analysis["robot0_normal"]
         robot1_grasp_point = best_analysis["robot1_face_center"]
         robot1_normal = best_analysis["robot1_normal"]
 
-        # Calculate approach points with consistent assignment
         approach_point0, approach_point1 = self.get_approach_points(
-            robot0_grasp_point,  # Robot 0's grasp point
-            robot1_grasp_point,  # Robot 1's grasp point
-            robot0_normal,  # Robot 0's normal
-            robot1_normal,  # Robot 1's normal
+            robot0_grasp_point,
+            robot1_grasp_point,
+            robot0_normal,
+            robot1_normal,
         )
 
         return GraspingPair(
             box_id=str(box.id),
-            grasping_point0=robot0_grasp_point,  # Always robot 0
-            grasping_point1=robot1_grasp_point,  # Always robot 1
-            normal0=robot0_normal,  # Always robot 0
-            normal1=robot1_normal,  # Always robot 1
-            approach_point0=approach_point0,  # Always robot 0
-            approach_point1=approach_point1,  # Always robot 1
+            grasping_point0=robot0_grasp_point,
+            grasping_point1=robot1_grasp_point,
+            normal0=robot0_normal,
+            normal1=robot1_normal,
+            approach_point0=approach_point0,
+            approach_point1=approach_point1,
             pair_type=best_pair.pair_type,
             confidence=float(box.confidence),
             total_distance=float(best_analysis["total_distance"]),
@@ -401,12 +398,12 @@ class GraspingPointsPublisher:
 
                         if grasping_pair:
                             grasping_data[grasping_pair.box_id] = {
-                                "grasping_point0": grasping_pair.grasping_point0.tolist(),  # always robot 0
-                                "grasping_point1": grasping_pair.grasping_point1.tolist(),  # always robot 1
-                                "normal0": grasping_pair.normal0.tolist(),  # always robot 0
-                                "normal1": grasping_pair.normal1.tolist(),  # always robot 1
-                                "approach_point0": grasping_pair.approach_point0.tolist(),  # always robot 0
-                                "approach_point1": grasping_pair.approach_point1.tolist(),  # always robot 1
+                                "grasping_point0": grasping_pair.grasping_point0.tolist(),
+                                "grasping_point1": grasping_pair.grasping_point1.tolist(),
+                                "normal0": grasping_pair.normal0.tolist(),
+                                "normal1": grasping_pair.normal1.tolist(),
+                                "approach_point0": grasping_pair.approach_point0.tolist(),
+                                "approach_point1": grasping_pair.approach_point1.tolist(),
                                 "approach_offset": self.calculator.approach_offset,
                                 "pair_type": grasping_pair.pair_type,
                                 "confidence": grasping_pair.confidence,
@@ -416,9 +413,9 @@ class GraspingPointsPublisher:
                                 "box_x_dim": box.x_dim,
                                 "box_y_dim": box.y_dim,
                                 "box_z_dim": box.z_dim,
-                                "box_position": box.position.tolist(),                # [x, y, z]
-                                "box_quaternion_wxyz": box.quaternions.tolist(),     # [w, x, y, z]
-                                "box_rotation_matrix": box.rotation_matrix.tolist(), # 3x3
+                                "box_position": box.position.tolist(),  # [x, y, z]
+                                "box_quaternion_wxyz": box.quaternions.tolist(),  # [w, x, y, z]
+                                "box_rotation_matrix": box.rotation_matrix.tolist(),  # 3x3
                             }
                         print("-----")
                         print(box.position.tolist())

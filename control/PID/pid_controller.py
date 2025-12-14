@@ -16,33 +16,36 @@ from utils.utils import (
     _assert_rotmat,
 )
 
+
 def flip_y_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
     rot_matrices = np.asarray(rot_matrices)
-    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), \
+    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), (
         "Expected rot_matrices with shape (N, 3, 3)"
+    )
 
     r = R.from_matrix(rot_matrices)
-    rotvecs = r.as_rotvec() 
+    rotvecs = r.as_rotvec()
 
     rotvecs[:, 1] *= -1.0
 
-    # Back to matrices
     r_fixed = R.from_rotvec(rotvecs)
     return r_fixed.as_matrix()
+
 
 def flip_x_component_in_rotations(rot_matrices: np.ndarray) -> np.ndarray:
     rot_matrices = np.asarray(rot_matrices)
-    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), \
+    assert rot_matrices.ndim == 3 and rot_matrices.shape[1:] == (3, 3), (
         "Expected rot_matrices with shape (N, 3, 3)"
+    )
 
     r = R.from_matrix(rot_matrices)
-    rotvecs = r.as_rotvec() 
+    rotvecs = r.as_rotvec()
 
     rotvecs[:, 0] *= -1.0
 
-    # Back to matrices
     r_fixed = R.from_rotvec(rotvecs)
     return r_fixed.as_matrix()
+
 
 def flip_xy_component_in_rotation(rot_matrix: np.ndarray) -> np.ndarray:
     rot_matrix = np.asarray(rot_matrix)
@@ -51,12 +54,12 @@ def flip_xy_component_in_rotation(rot_matrix: np.ndarray) -> np.ndarray:
     r = R.from_matrix(rot_matrix)
     rotvec = r.as_rotvec()
 
-    # Flip the x component
     rotvec[0] *= -1.0
     rotvec[1] *= -1.0
 
     r_fixed = R.from_rotvec(rotvec)
     return r_fixed.as_matrix()
+
 
 class VectorPIDController:
     """3D Vector PID Controller - separate PID for each axis"""
@@ -122,8 +125,8 @@ class URForceController(URController):
         ki_r=0,
         kd_r=0,
         kp_t=0,
-        ki_t=0, 
-        kd_t=0
+        ki_t=0,
+        kd_t=0,
     ):
         super().__init__(ip)
 
@@ -273,7 +276,6 @@ class URForceController(URController):
         self.control_thread = threading.Thread(target=self._control_loop3D, daemon=True)
         self.control_thread.start()
 
-    # ---------------- shared frame helpers ----------------
     def _canonicalize_pair(self, pA, pB):
         d = pB - pA
         axis = int(np.argmax(np.abs(d)))  # 0=x, 1=y, 2=z (dominant separation)
@@ -282,12 +284,10 @@ class URForceController(URController):
         return pA, pB
 
     def _compute_initial_box_frame(self, pA, pB):
-        # --- canonicalize ordering so both arms build the SAME frame ---
         pA, pB = self._canonicalize_pair(pA, pB)
 
         x_hat = (pB - pA) / (np.linalg.norm(pB - pA) + 1e-9)
 
-        # project world-z onto plane orthogonal to x_hat; fallback if degenerate
         z_guess = np.array([0, 0, 1])
         z_hat = z_guess - np.dot(z_guess, x_hat) * x_hat
         if np.linalg.norm(z_hat) < 1e-6:
@@ -296,7 +296,7 @@ class URForceController(URController):
         z_hat /= np.linalg.norm(z_hat) + 1e-9
 
         y_hat = np.cross(z_hat, x_hat)
-        y_hat /= np.linalg.norm(y_hat) + 1e-9  # (tiny numeric guard)
+        y_hat /= np.linalg.norm(y_hat) + 1e-9
 
         R_WB0 = np.column_stack([x_hat, y_hat, z_hat])
         p_WB0 = 0.5 * (pA + pB)
@@ -312,7 +312,7 @@ class URForceController(URController):
     def _compute_reference_rotation(self, R_B0B):
         R_WB = self._R_WB0 @ R_B0B
         return R_WB @ self._R_BG
-    
+
     def get_box_dimension(self):
         while not self._update_grasping_data():
             time.sleep(0.01)
@@ -320,7 +320,9 @@ class URForceController(URController):
         box_id = list(self.current_grasping_data.keys())[0]
         g = self.current_grasping_data[box_id]
 
-        return np.linalg.norm(np.array(g.get("grasping_point0")) - np.array(g.get("grasping_point1")))
+        return np.linalg.norm(
+            np.array(g.get("grasping_point0")) - np.array(g.get("grasping_point1"))
+        )
 
     def control_to_target(
         self,
@@ -363,7 +365,7 @@ class URForceController(URController):
             if self.robot_id == 0:
                 print("Flipped for robot 0")
                 self.rot_updates = flip_y_component_in_rotations(self.rot_updates)
-                
+
             self.pose_updates_stream = traj_npz.get("position", None)
             self._traj_len = len(self.rot_updates)
 
@@ -452,7 +454,6 @@ class URForceController(URController):
 
                     r_B_plus_offset = self._r_B + offset
 
-
                     delta_p_rot_B = (R_B0B - np.eye(3)) @ r_B_plus_offset
                     delta_p_rot_W = self._R_WB0 @ delta_p_rot_B
                     self.reference_position = (
@@ -510,7 +511,9 @@ class URForceController(URController):
                 # Torque
                 torque_ref_vector = np.zeros(3)  # always zero
                 torque_error_vector = torque_ref_vector - current_torque_vector
-                torque_output_vector, torque_p_term, torque_i_term, torque_d_term = self.torque_pid.update(torque_error_vector)
+                torque_output_vector, torque_p_term, torque_i_term, torque_d_term = (
+                    self.torque_pid.update(torque_error_vector)
+                )
 
                 # Rotation
                 self.reference_rotation_matrix = _assert_rotmat(
@@ -524,7 +527,9 @@ class URForceController(URController):
                     self.rot_pid.update(rotation_error_vector)
                 )
 
-                orientation_output_vector = rotation_output_vector + torque_output_vector
+                orientation_output_vector = (
+                    rotation_output_vector + torque_output_vector
+                )
 
                 # Command
                 speed_command = [*total_output_vector, *orientation_output_vector]
@@ -535,41 +540,44 @@ class URForceController(URController):
                     {
                         # --- meta/time ---
                         "timestamp": time.time() - self.start_time,
-
                         # --- linear: force ---
-                        "force_vector": current_force_vector,                  # measured (N)
-                        "reference_force_vector": ref_force_vector,            # target (N)
-                        "force_error_vector": force_error_vector,              # err (N)
-                        "force_output_vector": force_output_vector,            # PID out (m/s contrib)
-                        "force_p_term": force_p_term, "force_i_term": force_i_term, "force_d_term": force_d_term,
-
+                        "force_vector": current_force_vector,  # measured (N)
+                        "reference_force_vector": ref_force_vector,  # target (N)
+                        "force_error_vector": force_error_vector,  # err (N)
+                        "force_output_vector": force_output_vector,  # PID out (m/s contrib)
+                        "force_p_term": force_p_term,
+                        "force_i_term": force_i_term,
+                        "force_d_term": force_d_term,
                         # --- linear: position ---
-                        "position": current_position,                          # measured (m)
+                        "position": current_position,  # measured (m)
                         "reference_position": self.reference_position.copy(),  # target (m)
-                        "position_error_vector": position_error_vector,        # err (m)
-                        "position_output_vector": position_output_vector,      # PID out (m/s contrib)
-                        "pos_p_term": pos_p_term, "pos_i_term": pos_i_term, "pos_d_term": pos_d_term,
-
+                        "position_error_vector": position_error_vector,  # err (m)
+                        "position_output_vector": position_output_vector,  # PID out (m/s contrib)
+                        "pos_p_term": pos_p_term,
+                        "pos_i_term": pos_i_term,
+                        "pos_d_term": pos_d_term,
                         # --- orientation: rotation (pose tracking) ---
-                        "rotation": current_rotation,                          # measured rotvec (rad)
+                        "rotation": current_rotation,  # measured rotvec (rad)
                         "reference_rotation": self.reference_rotation.copy(),  # target rotvec (rad)
-                        "rotation_error_vector": rotation_error_vector,        # err (rad)
-                        "rotation_output_vector": rotation_output_vector,      # PID out (rad/s contrib)
-                        "rot_p_term": rot_p_term, "rot_i_term": rot_i_term, "rot_d_term": rot_d_term,
-
+                        "rotation_error_vector": rotation_error_vector,  # err (rad)
+                        "rotation_output_vector": rotation_output_vector,  # PID out (rad/s contrib)
+                        "rot_p_term": rot_p_term,
+                        "rot_i_term": rot_i_term,
+                        "rot_d_term": rot_d_term,
                         # --- orientation: torque (wrench rejection) ---
-                        "torque_vector": current_torque_vector,                # measured (Nm)
-                        "torque_ref_vector": torque_ref_vector,                # == 0
-                        "torque_error_vector": torque_error_vector,            # err (Nm)
-                        "torque_output_vector": torque_output_vector,          # PID out (rad/s contrib)
-                        "torque_p_term": torque_p_term, "torque_i_term": torque_i_term, "torque_d_term": torque_d_term,
-
+                        "torque_vector": current_torque_vector,  # measured (Nm)
+                        "torque_ref_vector": torque_ref_vector,  # == 0
+                        "torque_error_vector": torque_error_vector,  # err (Nm)
+                        "torque_output_vector": torque_output_vector,  # PID out (rad/s contrib)
+                        "torque_p_term": torque_p_term,
+                        "torque_i_term": torque_i_term,
+                        "torque_d_term": torque_d_term,
                         # --- totals & misc ---
-                        "total_output_vector": total_output_vector,            # linear m/s = -force + position
-                        "orientation_output_vector": orientation_output_vector,# rad/s = rotation + torque
+                        "total_output_vector": total_output_vector,  # linear m/s = -force + position
+                        "orientation_output_vector": orientation_output_vector,  # rad/s = rotation + torque
                         "deadzone_threshold": self.deadzone_threshold,
-                        "speed_command": np.array(speed_command),              # [vx vy vz wx wy wz]
-                        "start_position": self.start_position.copy(),          # for distance plot
+                        "speed_command": np.array(speed_command),  # [vx vy vz wx wy wz]
+                        "start_position": self.start_position.copy(),  # for distance plot
                     }
                 )
 
@@ -618,17 +626,14 @@ class URForceController(URController):
             print("No data to plot")
             return
 
-        # Check if PID components are logged
         if "force_p_term" not in self.control_data[0]:
             print(
                 "PID components not logged in control data. Make sure you're using the updated _control_loop3D method."
             )
             return
 
-        # Extract data from logged data
         timestamps = [d["timestamp"] for d in self.control_data]
 
-        # Extract logged PID components
         force_p_terms = np.array([d["force_p_term"] for d in self.control_data])
         force_i_terms = np.array([d["force_i_term"] for d in self.control_data])
         force_d_terms = np.array([d["force_d_term"] for d in self.control_data])
@@ -637,17 +642,14 @@ class URForceController(URController):
         pos_i_terms = np.array([d["pos_i_term"] for d in self.control_data])
         pos_d_terms = np.array([d["pos_d_term"] for d in self.control_data])
 
-        # Check if rotation PID data exists
         has_rotation_data = "rot_p_term" in self.control_data[0]
         if has_rotation_data:
             rot_p_terms = np.array([d["rot_p_term"] for d in self.control_data])
             rot_i_terms = np.array([d["rot_i_term"] for d in self.control_data])
             rot_d_terms = np.array([d["rot_d_term"] for d in self.control_data])
 
-        # Setup plot
         current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-        # PID parameters (handle both scalar and vector PIDs)
         if hasattr(self.force_pid, "kp") and np.isscalar(self.force_pid.kp):
             force_pid_str = f"Kp={self.force_pid.kp:.3f}, Ki={self.force_pid.ki:.3f}, Kd={self.force_pid.kd:.3f}"
         else:
@@ -660,7 +662,6 @@ class URForceController(URController):
                 f"Kp={self.pose_pid.kp}, Ki={self.pose_pid.ki}, Kd={self.pose_pid.kd}"
             )
 
-        # Get rotation PID string if available
         rot_pid_str = ""
         if has_rotation_data:
             if hasattr(self, "rot_pid"):
@@ -678,11 +679,9 @@ class URForceController(URController):
                 else:
                     rot_pid_str = f"Kp={pid_obj.kp}, Ki={pid_obj.ki}, Kd={pid_obj.kd}"
 
-        # Create figure with appropriate size
         fig_width = 30 if has_rotation_data else 20
         plt.figure(figsize=(fig_width, 12))
 
-        # Main title
         title_parts = [
             f"PID Components Analysis ({current_datetime})",
             f"Force PID: ({force_pid_str}), Pose PID: ({pose_pid_str})",
@@ -696,9 +695,6 @@ class URForceController(URController):
         axis_labels = ["X", "Y", "Z"]
         n_cols = 4 if has_rotation_data else 3
 
-        # === COLUMN 1: Force PID Components ===
-
-        # 1. Force P Terms
         plt.subplot(3, n_cols, 1)
         for axis in range(3):
             plt.plot(
@@ -715,7 +711,6 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # 4. Force I Terms
         plt.subplot(3, n_cols, n_cols + 1)
         for axis in range(3):
             plt.plot(
@@ -732,7 +727,6 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # 7. Force D Terms
         plt.subplot(3, n_cols, 2 * n_cols + 1)
         for axis in range(3):
             plt.plot(
@@ -749,9 +743,6 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # === COLUMN 2: Position PID Components ===
-
-        # 2. Position P Terms
         plt.subplot(3, n_cols, 2)
         for axis in range(3):
             plt.plot(
@@ -768,7 +759,6 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # 5. Position I Terms
         plt.subplot(3, n_cols, n_cols + 2)
         for axis in range(3):
             plt.plot(
@@ -785,7 +775,6 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # 8. Position D Terms
         plt.subplot(3, n_cols, 2 * n_cols + 2)
         for axis in range(3):
             plt.plot(
@@ -802,11 +791,9 @@ class URForceController(URController):
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-        # === COLUMN 3: Rotation PID Components (if available) ===
         if has_rotation_data:
             rot_axis_labels = ["Rx", "Ry", "Rz"]
 
-            # 3. Rotation P Terms
             plt.subplot(3, n_cols, 3)
             for axis in range(3):
                 plt.plot(
@@ -823,7 +810,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 6. Rotation I Terms
             plt.subplot(3, n_cols, n_cols + 3)
             for axis in range(3):
                 plt.plot(
@@ -840,7 +826,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 9. Rotation D Terms
             plt.subplot(3, n_cols, 2 * n_cols + 3)
             for axis in range(3):
                 plt.plot(
@@ -857,13 +842,10 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # === COLUMN 4: Combined Terms ===
-            # Calculate combined terms including rotation
             combined_p_terms = force_p_terms + pos_p_terms + rot_p_terms
             combined_i_terms = force_i_terms + pos_i_terms + rot_i_terms
             combined_d_terms = force_d_terms + pos_d_terms + rot_d_terms
 
-            # 4. Combined P Terms
             plt.subplot(3, n_cols, 4)
             for axis in range(3):
                 plt.plot(
@@ -880,7 +862,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 7. Combined I Terms
             plt.subplot(3, n_cols, n_cols + 4)
             for axis in range(3):
                 plt.plot(
@@ -897,7 +878,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 10. Combined D Terms
             plt.subplot(3, n_cols, 2 * n_cols + 4)
             for axis in range(3):
                 plt.plot(
@@ -915,12 +895,10 @@ class URForceController(URController):
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
         else:
-            # === COLUMN 3: Combined Terms (without rotation) ===
             combined_p_terms = force_p_terms + pos_p_terms
             combined_i_terms = force_i_terms + pos_i_terms
             combined_d_terms = force_d_terms + pos_d_terms
 
-            # 3. Combined P Terms
             plt.subplot(3, n_cols, 3)
             for axis in range(3):
                 plt.plot(
@@ -937,7 +915,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 6. Combined I Terms
             plt.subplot(3, n_cols, n_cols + 3)
             for axis in range(3):
                 plt.plot(
@@ -954,7 +931,6 @@ class URForceController(URController):
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color="black", linestyle="-", linewidth=1, alpha=0.5)
 
-            # 9. Combined D Terms
             plt.subplot(3, n_cols, 2 * n_cols + 3)
             for axis in range(3):
                 plt.plot(
@@ -973,7 +949,6 @@ class URForceController(URController):
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        # Save the plot
         plot_type = "6dof" if has_rotation_data else "3dof"
         filename = f"plots/pid_components_analysis_{plot_type}_{current_datetime}_{self.robot_id}.png"
         os.makedirs("plots", exist_ok=True)
@@ -987,206 +962,280 @@ class URForceController(URController):
             print("No data to plot")
             return
 
-        # ---------- gather ----------
         ts = np.array([d["timestamp"] for d in self.control_data])
 
-        # linear: force
-        Fm  = np.array([d["force_vector"] for d in self.control_data])                  # measured
-        Fr  = np.array([d["reference_force_vector"] for d in self.control_data])        # ref
-        Fe  = np.array([d["force_error_vector"] for d in self.control_data])            # error
-        Fo  = np.array([d["force_output_vector"] for d in self.control_data])           # output
+        Fm = np.array([d["force_vector"] for d in self.control_data])  # measured
+        Fr = np.array([d["reference_force_vector"] for d in self.control_data])  # ref
+        Fe = np.array([d["force_error_vector"] for d in self.control_data])  # error
+        Fo = np.array([d["force_output_vector"] for d in self.control_data])  # output
 
-        # linear: position
-        Pm  = np.array([d["position"] for d in self.control_data])
-        Pr  = np.array([d["reference_position"] for d in self.control_data])
-        Pe  = np.array([d["position_error_vector"] for d in self.control_data])
-        Po  = np.array([d["position_output_vector"] for d in self.control_data])
+        Pm = np.array([d["position"] for d in self.control_data])
+        Pr = np.array([d["reference_position"] for d in self.control_data])
+        Pe = np.array([d["position_error_vector"] for d in self.control_data])
+        Po = np.array([d["position_output_vector"] for d in self.control_data])
 
-        # orientation: rotation
-        has_rotation = "rotation" in self.control_data[0] and "reference_rotation" in self.control_data[0]
+        has_rotation = (
+            "rotation" in self.control_data[0]
+            and "reference_rotation" in self.control_data[0]
+        )
         if has_rotation:
-            Rm  = np.array([d["rotation"] for d in self.control_data])                  # rotvec (rad)
-            Rr  = np.array([d["reference_rotation"] for d in self.control_data])
-            Re  = np.array([d["rotation_error_vector"] for d in self.control_data])
-            Ro  = np.array([d["rotation_output_vector"] for d in self.control_data])
+            Rm = np.array([d["rotation"] for d in self.control_data])  # rotvec (rad)
+            Rr = np.array([d["reference_rotation"] for d in self.control_data])
+            Re = np.array([d["rotation_error_vector"] for d in self.control_data])
+            Ro = np.array([d["rotation_output_vector"] for d in self.control_data])
         else:
             Rm = Rr = Re = Ro = None
 
-        # orientation: torque
         has_torque = "torque_vector" in self.control_data[0]
         if has_torque:
-            Tm  = np.array([d["torque_vector"] for d in self.control_data])             # Nm
-            Tr  = np.array([d["torque_ref_vector"] for d in self.control_data])         # zeros
-            Te  = np.array([d["torque_error_vector"] for d in self.control_data])
-            To  = np.array([d["torque_output_vector"] for d in self.control_data])      # rad/s contrib
+            Tm = np.array([d["torque_vector"] for d in self.control_data])  # Nm
+            Tr = np.array([d["torque_ref_vector"] for d in self.control_data])  # zeros
+            Te = np.array([d["torque_error_vector"] for d in self.control_data])
+            To = np.array(
+                [d["torque_output_vector"] for d in self.control_data]
+            )  # rad/s contrib
         else:
             Tm = Tr = Te = To = None
 
-        # totals & summary
-        Ltot = np.array([d["total_output_vector"] for d in self.control_data])          # m/s
-        Otot = np.array([d["orientation_output_vector"] for d in self.control_data])    # rad/s
+        Ltot = np.array([d["total_output_vector"] for d in self.control_data])  # m/s
+        Otot = np.array(
+            [d["orientation_output_vector"] for d in self.control_data]
+        )  # rad/s
         start_p = self.control_data[0].get("start_position", Pm[0])
         dist = np.linalg.norm(Pm - start_p, axis=1)
 
-        # ---------- figure ----------
-        # 5 columns: Force | Position | Rotation | Torque | Summary
         n_cols = 5
-        fig_w  = 30
+        fig_w = 30
         plt.figure(figsize=(fig_w, 12))
         colors = ["red", "green", "blue"]
-        axlbl  = ["X", "Y", "Z"]
+        axlbl = ["X", "Y", "Z"]
 
         def col(row, col_idx):
             """Compute subplot index for (row 1..3, col 1..5)."""
             return (row - 1) * n_cols + col_idx
 
-        # ========== COLUMN 1: FORCE ==========
-        # Row 1: ref vs measured
-        plt.subplot(3, n_cols, col(1,1))
+        plt.subplot(3, n_cols, col(1, 1))
         for i in range(3):
-            plt.plot(ts, Fm[:,i], label=f"{axlbl[i]} Force", linewidth=2, color=colors[i])
-            plt.plot(ts, Fr[:,i], "--", label=f"{axlbl[i]} Target", linewidth=2, alpha=0.7, color=colors[i])
-        plt.title("Force vs Target"); plt.xlabel("Time (s)"); plt.ylabel("Force (N)")
-        plt.legend(); plt.grid(True, alpha=0.3)
+            plt.plot(
+                ts, Fm[:, i], label=f"{axlbl[i]} Force", linewidth=2, color=colors[i]
+            )
+            plt.plot(
+                ts,
+                Fr[:, i],
+                "--",
+                label=f"{axlbl[i]} Target",
+                linewidth=2,
+                alpha=0.7,
+                color=colors[i],
+            )
+        plt.title("Force vs Target")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Force (N)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 2: errors
-        plt.subplot(3, n_cols, col(2,1))
+        plt.subplot(3, n_cols, col(2, 1))
         mag = np.linalg.norm(Fe, axis=1)
-        for i in range(3): plt.plot(ts, Fe[:,i], label=f"Err {axlbl[i]}", linewidth=2, color=colors[i])
+        for i in range(3):
+            plt.plot(
+                ts, Fe[:, i], label=f"Err {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.plot(ts, mag, "--", label="|Err|", linewidth=2, color="black")
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-        plt.title("Force Error"); plt.xlabel("Time (s)"); plt.ylabel("N")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Force Error")
+        plt.xlabel("Time (s)")
+        plt.ylabel("N")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 3: outputs
-        plt.subplot(3, n_cols, col(3,1))
+        plt.subplot(3, n_cols, col(3, 1))
         mag = np.linalg.norm(Fo, axis=1)
-        for i in range(3): plt.plot(ts, Fo[:,i], label=f"Out {axlbl[i]}", linewidth=2, color=colors[i])
+        for i in range(3):
+            plt.plot(
+                ts, Fo[:, i], label=f"Out {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.plot(ts, mag, "--", label="|Out|", linewidth=2, color="black")
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-        plt.title("Force PID Output (→ linear)"); plt.xlabel("Time (s)"); plt.ylabel("m/s contrib")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Force PID Output (→ linear)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m/s contrib")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # ========== COLUMN 2: POSITION ==========
-        # Row 1
-        plt.subplot(3, n_cols, col(1,2))
+        plt.subplot(3, n_cols, col(1, 2))
         for i in range(3):
-            plt.plot(ts, Pm[:,i], label=f"{axlbl[i]} Pos", linewidth=2, color=colors[i])
-            plt.plot(ts, Pr[:,i], "--", label=f"{axlbl[i]} Target", linewidth=2, alpha=0.7, color=colors[i])
-        plt.title("Position vs Target"); plt.xlabel("Time (s)"); plt.ylabel("m")
-        plt.legend(); plt.grid(True, alpha=0.3)
+            plt.plot(
+                ts, Pm[:, i], label=f"{axlbl[i]} Pos", linewidth=2, color=colors[i]
+            )
+            plt.plot(
+                ts,
+                Pr[:, i],
+                "--",
+                label=f"{axlbl[i]} Target",
+                linewidth=2,
+                alpha=0.7,
+                color=colors[i],
+            )
+        plt.title("Position vs Target")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 2
-        plt.subplot(3, n_cols, col(2,2))
+        plt.subplot(3, n_cols, col(2, 2))
         mag = np.linalg.norm(Pe, axis=1)
-        for i in range(3): plt.plot(ts, Pe[:,i], label=f"Err {axlbl[i]}", linewidth=2, color=colors[i])
+        for i in range(3):
+            plt.plot(
+                ts, Pe[:, i], label=f"Err {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.plot(ts, mag, "--", label="|Err|", linewidth=2, color="black")
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
         dz = self.control_data[0].get("deadzone_threshold", None)
         if dz is not None:
-            plt.axhline(dz,  color="orange", linestyle="dotted", linewidth=2, label=f"±Deadzone")
+            plt.axhline(
+                dz, color="orange", linestyle="dotted", linewidth=2, label=f"±Deadzone"
+            )
             plt.axhline(-dz, color="orange", linestyle="dotted", linewidth=2)
-        plt.title("Position Error"); plt.xlabel("Time (s)"); plt.ylabel("m")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Position Error")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 3
-        plt.subplot(3, n_cols, col(3,2))
+        plt.subplot(3, n_cols, col(3, 2))
         mag = np.linalg.norm(Po, axis=1)
-        for i in range(3): plt.plot(ts, Po[:,i], label=f"Out {axlbl[i]}", linewidth=2, color=colors[i])
+        for i in range(3):
+            plt.plot(
+                ts, Po[:, i], label=f"Out {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.plot(ts, mag, "--", label="|Out|", linewidth=2, color="black")
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-        plt.title("Position PID Output (→ linear)"); plt.xlabel("Time (s)"); plt.ylabel("m/s contrib")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Position PID Output (→ linear)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m/s contrib")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # ========== COLUMN 3: ROTATION ==========
         if has_rotation:
-            # Row 1
-            plt.subplot(3, n_cols, col(1,3))
-            for i,lbl in enumerate(["Rx","Ry","Rz"]):
-                plt.plot(ts, Rm[:,i], label=f"{lbl}", linewidth=2, color=colors[i])
-                plt.plot(ts, Rr[:,i], "--", label=f"{lbl} Target", linewidth=2, alpha=0.7, color=colors[i])
-            plt.title("Rotation vs Target (rotvec)"); plt.xlabel("Time (s)"); plt.ylabel("rad")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.subplot(3, n_cols, col(1, 3))
+            for i, lbl in enumerate(["Rx", "Ry", "Rz"]):
+                plt.plot(ts, Rm[:, i], label=f"{lbl}", linewidth=2, color=colors[i])
+                plt.plot(
+                    ts,
+                    Rr[:, i],
+                    "--",
+                    label=f"{lbl} Target",
+                    linewidth=2,
+                    alpha=0.7,
+                    color=colors[i],
+                )
+            plt.title("Rotation vs Target (rotvec)")
+            plt.xlabel("Time (s)")
+            plt.ylabel("rad")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
 
-            # Row 2
-            plt.subplot(3, n_cols, col(2,3))
+            plt.subplot(3, n_cols, col(2, 3))
             mag = np.linalg.norm(Re, axis=1)
-            for i,lbl in enumerate(["Rx","Ry","Rz"]):
-                plt.plot(ts, Re[:,i], label=f"Err {lbl}", linewidth=2, color=colors[i])
+            for i, lbl in enumerate(["Rx", "Ry", "Rz"]):
+                plt.plot(ts, Re[:, i], label=f"Err {lbl}", linewidth=2, color=colors[i])
             plt.plot(ts, mag, "--", label="|Err|", linewidth=2, color="black")
             plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-            plt.title("Rotation Error"); plt.xlabel("Time (s)"); plt.ylabel("rad")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.title("Rotation Error")
+            plt.xlabel("Time (s)")
+            plt.ylabel("rad")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
 
-            # Row 3
-            plt.subplot(3, n_cols, col(3,3))
+            plt.subplot(3, n_cols, col(3, 3))
             mag = np.linalg.norm(Ro, axis=1)
-            for i,lbl in enumerate(["Rx","Ry","Rz"]):
-                plt.plot(ts, Ro[:,i], label=f"Out {lbl}", linewidth=2, color=colors[i])
+            for i, lbl in enumerate(["Rx", "Ry", "Rz"]):
+                plt.plot(ts, Ro[:, i], label=f"Out {lbl}", linewidth=2, color=colors[i])
             plt.plot(ts, mag, "--", label="|Out|", linewidth=2, color="black")
             plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-            plt.title("Rotation PID Output (→ orient)"); plt.xlabel("Time (s)"); plt.ylabel("rad/s contrib")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.title("Rotation PID Output (→ orient)")
+            plt.xlabel("Time (s)")
+            plt.ylabel("rad/s contrib")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
         else:
-            # placeholders if no rotation logged
-            for r in (1,2,3):
-                plt.subplot(3, n_cols, col(r,3))
+            for r in (1, 2, 3):
+                plt.subplot(3, n_cols, col(r, 3))
                 plt.axis("off")
 
-        # ========== COLUMN 4: TORQUE ==========
         if has_torque:
-            # Row 1
-            plt.subplot(3, n_cols, col(1,4))
-            for i,lbl in enumerate(["Tx","Ty","Tz"]):
-                plt.plot(ts, Tm[:,i], label=f"{lbl}", linewidth=2, color=colors[i])
-                plt.plot(ts, Tr[:,i], "--", label=f"{lbl} Target", linewidth=2, alpha=0.7, color=colors[i])
-            plt.title("Torque vs Target"); plt.xlabel("Time (s)"); plt.ylabel("Nm")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.subplot(3, n_cols, col(1, 4))
+            for i, lbl in enumerate(["Tx", "Ty", "Tz"]):
+                plt.plot(ts, Tm[:, i], label=f"{lbl}", linewidth=2, color=colors[i])
+                plt.plot(
+                    ts,
+                    Tr[:, i],
+                    "--",
+                    label=f"{lbl} Target",
+                    linewidth=2,
+                    alpha=0.7,
+                    color=colors[i],
+                )
+            plt.title("Torque vs Target")
+            plt.xlabel("Time (s)")
+            plt.ylabel("Nm")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
 
-            # Row 2
-            plt.subplot(3, n_cols, col(2,4))
+            plt.subplot(3, n_cols, col(2, 4))
             mag = np.linalg.norm(Te, axis=1)
-            for i,lbl in enumerate(["Tx","Ty","Tz"]):
-                plt.plot(ts, Te[:,i], label=f"Err {lbl}", linewidth=2, color=colors[i])
+            for i, lbl in enumerate(["Tx", "Ty", "Tz"]):
+                plt.plot(ts, Te[:, i], label=f"Err {lbl}", linewidth=2, color=colors[i])
             plt.plot(ts, mag, "--", label="|Err|", linewidth=2, color="black")
             plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-            plt.title("Torque Error"); plt.xlabel("Time (s)"); plt.ylabel("Nm")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.title("Torque Error")
+            plt.xlabel("Time (s)")
+            plt.ylabel("Nm")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
 
-            # Row 3
-            plt.subplot(3, n_cols, col(3,4))
+            plt.subplot(3, n_cols, col(3, 4))
             mag = np.linalg.norm(To, axis=1)
-            for i,lbl in enumerate(["Tx","Ty","Tz"]):
-                plt.plot(ts, To[:,i], label=f"Out {lbl}", linewidth=2, color=colors[i])
+            for i, lbl in enumerate(["Tx", "Ty", "Tz"]):
+                plt.plot(ts, To[:, i], label=f"Out {lbl}", linewidth=2, color=colors[i])
             plt.plot(ts, mag, "--", label="|Out|", linewidth=2, color="black")
             plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-            plt.title("Torque PID Output (→ orient)"); plt.xlabel("Time (s)"); plt.ylabel("rad/s contrib")
-            plt.legend(); plt.grid(True, alpha=0.3)
+            plt.title("Torque PID Output (→ orient)")
+            plt.xlabel("Time (s)")
+            plt.ylabel("rad/s contrib")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
         else:
-            for r in (1,2,3):
-                plt.subplot(3, n_cols, col(r,4))
+            for r in (1, 2, 3):
+                plt.subplot(3, n_cols, col(r, 4))
                 plt.axis("off")
 
-        # ========== COLUMN 5: SUMMARY ==========
-        # Row 1: total outputs (linear & orientation magnitudes)
-        plt.subplot(3, n_cols, col(1,5))
+        plt.subplot(3, n_cols, col(1, 5))
         plt.plot(ts, np.linalg.norm(Ltot, axis=1), label="|Linear Out|", linewidth=2)
         plt.plot(ts, np.linalg.norm(Otot, axis=1), label="|Orient Out|", linewidth=2)
-        plt.title("Total Output Magnitudes"); plt.xlabel("Time (s)"); plt.ylabel("m/s & rad/s")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Total Output Magnitudes")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m/s & rad/s")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 2: total outputs per-axis (linear only)
-        plt.subplot(3, n_cols, col(2,5))
+        plt.subplot(3, n_cols, col(2, 5))
         for i in range(3):
-            plt.plot(ts, Ltot[:,i], label=f"Linear {axlbl[i]}", linewidth=2, color=colors[i])
+            plt.plot(
+                ts, Ltot[:, i], label=f"Linear {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
-        plt.title("Total Linear Output (per-axis)"); plt.xlabel("Time (s)"); plt.ylabel("m/s")
-        plt.legend(); plt.grid(True, alpha=0.3)
+        plt.title("Total Linear Output (per-axis)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("m/s")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
 
-        # Row 3: distance moved (and cap)
-        plt.subplot(3, n_cols, col(3,5))
+        plt.subplot(3, n_cols, col(3, 5))
         for i in range(3):
-            plt.plot(ts, Otot[:, i], label=f"Orient {axlbl[i]}", linewidth=2, color=colors[i])
+            plt.plot(
+                ts, Otot[:, i], label=f"Orient {axlbl[i]}", linewidth=2, color=colors[i]
+            )
         plt.axhline(0, color="black", linewidth=1, alpha=0.5)
         plt.title("Total Orientation Output (per-axis)")
         plt.xlabel("Time (s)")
@@ -1194,15 +1243,19 @@ class URForceController(URController):
         plt.legend()
         plt.grid(True, alpha=0.3)
 
-        # ---------- title + save ----------
         current_datetime = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        ctrl_summary = "6DOF + Torque" if (has_rotation and has_torque) else \
-                    "6DOF" if has_rotation else \
-                    "3DOF" + (" + Torque" if has_torque else "")
+        ctrl_summary = (
+            "6DOF + Torque"
+            if (has_rotation and has_torque)
+            else "6DOF"
+            if has_rotation
+            else "3DOF" + (" + Torque" if has_torque else "")
+        )
 
         plt.suptitle(
             f"Vector Control Dashboard ({ctrl_summary}) — {current_datetime}",
-            fontsize=16, y=0.98
+            fontsize=16,
+            y=0.98,
         )
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
