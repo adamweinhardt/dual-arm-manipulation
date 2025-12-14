@@ -1,4 +1,4 @@
-# Dual arm manipulation
+# Cooperative Control for Dual-Arm Robotic Manipulation
 
 This repository implements a cooperative dual-arm manipulation approach for side-grasping box-shaped objects using UR5e robots, emphasizing real-time control over complex motion planning. It features two experimentally validated strategies: a multi-stage PID controller for robust force regulation and a QP-based impedance-admittance controller for compliant, stable interaction.
 
